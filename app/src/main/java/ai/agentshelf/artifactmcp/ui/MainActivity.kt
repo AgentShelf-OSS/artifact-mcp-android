@@ -14,6 +14,7 @@ import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -41,7 +42,6 @@ import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
-import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebMessageCompat
@@ -103,8 +103,7 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         setContentView(container)
         // Edge-to-edge is enforced on recent Android: keep the viewer clear of the status bar,
         // display cutout, navigation bar and keyboard, and tint the status-bar strip to match.
-        container.setBackgroundColor(ContextCompat.getColor(this, R.color.viewer_chrome))
-        WindowCompat.getInsetsController(window, container).isAppearanceLightStatusBars = !isNightMode()
+        applyChrome()
         ViewCompat.setOnApplyWindowInsetsListener(container) { view, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or
@@ -157,9 +156,18 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         webView = view
     }
 
-    private fun isNightMode(): Boolean =
-        (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
-            android.content.res.Configuration.UI_MODE_NIGHT_YES
+    /** Strip colour and bar icon colour for the current light or dark theme. */
+    private fun applyChrome() {
+        container.setBackgroundColor(ContextCompat.getColor(this, R.color.viewer_chrome))
+        SystemBars.matchIcons(window, container, SystemBars.isNight(this))
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // uiMode is in android:configChanges (the WebView must survive a theme switch), so the
+        // activity is not recreated and the chrome has to follow the new light or dark theme here.
+        if (::container.isInitialized) applyChrome()
+    }
 
     private fun harden(settings: WebSettings) {
         settings.allowFileAccess = false
