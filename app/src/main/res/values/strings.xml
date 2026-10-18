@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Artifact MCP</string>
+
+    <string name="setup_title">Connect to a server</string>
+    <string name="setup_intro">Enter the address of your Artifact MCP server. It must start with https://.</string>
+    <string name="setup_hint">Server address, for example https://artifact.example.com</string>
+    <string name="setup_continue">Continue</string>
+    <string name="setup_note">The app opens this server\'s gallery and signs in with the server\'s own login page. You can change the server later in Settings.</string>
+    <string name="setup_error_https">Use an https:// address.</string>
+    <string name="setup_error_path">Enter only the server address, without a path or query.</string>
+    <string name="setup_error_userinfo">Do not put a user name or password in the address.</string>
+    <string name="setup_error_malformed">This is not a valid server address.</string>
+    <string name="setup_change_title">Change server?</string>
+    <string name="setup_change_message">Changing from %1$s to %2$s signs you out and clears cookies, cached audio and artifact permissions.</string>
+    <string name="setup_change_confirm">Change and sign out</string>
+
+    <string name="settings_title">Settings</string>
+    <string name="settings_server">Server</string>
+    <string name="settings_no_server">No server configured.</string>
+    <string name="settings_change_server">Change server</string>
+    <string name="settings_location_now">Location in use now</string>
+    <string name="settings_location_idle">No artifact is using your location.</string>
+    <string name="settings_grants">Artifact permissions</string>
+    <string name="settings_no_grants">No artifact has asked for location or notifications yet.</string>
+    <string name="settings_revoke">Revoke</string>
+    <string name="settings_revoked">Revoked for %1$s</string>
+    <string name="settings_data">Data</string>
+    <string name="settings_clear">Sign out and clear data</string>
+    <string name="settings_clear_explain">Removes the sign-in session (cookies), web storage, cached audio, artifact permissions and geotrigger history from this device.</string>
+    <string name="settings_clear_confirm">You will need to sign in again.</string>
+    <string name="settings_cleared">Signed out. Data cleared.</string>
+    <string name="settings_about">About</string>
+    <string name="settings_version">Version %1$s. Bridge protocol version 1 (ADR-0018).</string>
+
+    <string name="capability_location">Location (watch and geotriggers)</string>
+    <string name="capability_notify">Notifications</string>
+
+    <string name="consent_location_title">Allow %1$s to use your location?</string>
+    <string name="consent_location_message">%1$s asks for your location. While it is in use, a notification with a Stop button stays visible, and location keeps working with the screen off. You can revoke this in Settings.</string>
+    <string name="consent_notify_title">Allow %1$s to send notifications?</string>
+    <string name="consent_notify_message">%1$s asks to show notifications on this device. You can revoke this in Settings.</string>
+    <string name="consent_allow">Allow</string>
+    <string name="consent_deny">Don\'t allow</string>
+
+    <string name="google_blocked_title">Use the email login code</string>
+    <string name="google_blocked_message">Google does not allow its sign-in page inside apps. On the sign-in page, enter your email address and choose \"Send login code\", then enter the code from the email.</string>
+
+    <string name="menu_gallery">Gallery</string>
+    <string name="menu_reload">Reload</string>
+    <string name="downloads_unsupported">Downloads are not supported in the viewer.</string>
+    <string name="no_app_for_link">No app can open this link.</string>
+
+    <string name="channel_location">Location in use</string>
+    <string name="channel_location_description">Shown while an artifact uses your location.</string>
+    <string name="channel_artifact">Artifact notifications</string>
+    <string name="channel_artifact_description">Notifications sent by artifacts you allowed.</string>
+    <string name="location_notification_title">%1$s is using your location for %2$s</string>
+    <string name="location_subject_unknown">an artifact</string>
+    <plurals name="location_subject_many">
+        <item quantity="one">%1$s and %2$d more</item>
+        <item quantity="other">%1$s and %2$d more</item>
+    </plurals>
+    <string name="location_stop">Stop</string>
+
+    <string name="browse_queue">Now queued</string>
+    <string name="browse_triggers">Geotrigger stops</string>
+</resources>
