@@ -318,4 +318,69 @@ class BridgeHubTest {
         hub.onShellMessage(watch, shell)
         assertThat(location.demand?.labels).containsExactly("Road trip · Day 1")
     }
+
+    // ---- media.session (ADR-0019) --------------------------------------------------------
+
+    private val playing = """{"v":1,"type":"media.session","artifactId":"book","state":"playing","title":"Ch 1","artist":"Ava","album":"Book","actions":["play","pause"]}"""
+
+    private fun mediaHub(sink: MutableList<Pair<Protocol.Inbound.MediaSession, ShellConnection>>) =
+        BridgeHub("0.1.0", { now }, { origin }, grants, played, notices, location, audio, notifier) { message, connection ->
+            sink += message to connection
+        }
+
+    @Test fun `media session from the viewer reaches the sink`() {
+        val sessions = mutableListOf<Pair<Protocol.Inbound.MediaSession, ShellConnection>>()
+        val withMedia = mediaHub(sessions)
+        val shell = Shell("book")
+        withMedia.onShellMessage(playing, shell)
+        assertThat(sessions).hasSize(1)
+        assertThat(sessions.single().first.title).isEqualTo("Ch 1")
+        assertThat(sessions.single().second).isSameInstanceAs(shell)
+        assertThat(shell.sent).isEmpty()
+    }
+
+    @Test fun `media session for another artifact is denied`() {
+        val sessions = mutableListOf<Pair<Protocol.Inbound.MediaSession, ShellConnection>>()
+        val withMedia = mediaHub(sessions)
+        val shell = Shell("other")
+        withMedia.onShellMessage(playing, shell)
+        assertThat(sessions).isEmpty()
+        assertThat(shell.last().str("reason")).isEqualTo("denied")
+        val reader = Shell("other")
+        withMedia.onShellMessage(playing, reader, reader = true)
+        assertThat(sessions).isEmpty()
+        assertThat(reader.last().str("reason")).isEqualTo("denied")
+    }
+
+    @Test fun `reader pages only say hello and report media sessions`() {
+        val sessions = mutableListOf<Pair<Protocol.Inbound.MediaSession, ShellConnection>>()
+        val withMedia = mediaHub(sessions)
+        notices.add(ai.agentshelf.artifactmcp.state.Notice("book", "w1", "denied"))
+        val reader = Shell("book")
+        withMedia.onShellMessage("""{"v":1,"type":"hello"}""", reader, reader = true)
+        assertThat(reader.types()).containsExactly("ready")
+        withMedia.onShellMessage(playing, reader, reader = true)
+        assertThat(sessions).hasSize(1)
+        withMedia.onShellMessage(watch.replace("trip", "book"), reader, reader = true)
+        assertThat(reader.last().str("reason")).isEqualTo("denied")
+        assertThat(consentAsked).isEmpty()
+        assertThat(location.demand).isNull()
+        // The stored notice is still there for the visible viewer.
+        val viewer = Shell("book")
+        withMedia.onShellMessage("""{"v":1,"type":"hello"}""", viewer)
+        assertThat(viewer.types()).containsExactly("ready", "geo.error").inOrder()
+    }
+
+    @Test fun `a reader page does not take native events from the viewer`() {
+        val sessions = mutableListOf<Pair<Protocol.Inbound.MediaSession, ShellConnection>>()
+        val withMedia = mediaHub(sessions)
+        val viewer = Shell("trip")
+        withMedia.consent = hub.consent
+        withMedia.onShellMessage(watch, viewer)
+        val reader = Shell("trip")
+        withMedia.onShellMessage("""{"v":1,"type":"hello"}""", reader, reader = true)
+        withMedia.onFix(Fix(1.0, 2.0, 5.0, now))
+        assertThat(viewer.types()).contains("geo.position")
+        assertThat(reader.types()).doesNotContain("geo.position")
+    }
 }

@@ -65,4 +65,8 @@
 
     <string name="browse_queue">Now queued</string>
     <string name="browse_triggers">Geotrigger stops</string>
+    <string name="browse_library">Library</string>
+    <string name="browse_sign_in">Open the app on your phone to sign in</string>
+    <string name="browse_offline">Library unavailable. Check the phone\'s connection.</string>
+    <string name="browse_empty">No artifacts yet</string>
 </resources>

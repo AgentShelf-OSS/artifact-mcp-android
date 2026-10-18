@@ -122,4 +122,22 @@ class OriginPolicyTest {
         assertThat(OriginPolicy.resolveSameOriginUrl("/a b.mp3", origin)).isNull()
         assertThat(OriginPolicy.resolveSameOriginUrl("https://artifact.example.com@evil.example/x", origin)).isNull()
     }
+
+    @Test fun `listen URL adds the autoplay query to the viewer URL`() {
+        assertThat(OriginPolicy.listenUrl(origin, "trip")).isEqualTo("$origin/trip?listen=autoplay")
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { OriginPolicy.listenUrl(origin, "../x") }
+    }
+
+    @Test fun `reader URLs are only the viewer URL with or without autoplay`() {
+        assertThat(OriginPolicy.isReaderUrl("$origin/trip", origin)).isTrue()
+        assertThat(OriginPolicy.isReaderUrl("$origin/trip?listen=autoplay", origin)).isTrue()
+        assertThat(OriginPolicy.isReaderUrl("$origin/", origin)).isFalse()
+        assertThat(OriginPolicy.isReaderUrl("$origin/trip/raw", origin)).isFalse()
+        assertThat(OriginPolicy.isReaderUrl("$origin/trip?listen=autoplay&x=1", origin)).isFalse()
+        assertThat(OriginPolicy.isReaderUrl("$origin/trip#frag", origin)).isFalse()
+        assertThat(OriginPolicy.isReaderUrl("$origin/api/library", origin)).isFalse()
+        assertThat(OriginPolicy.isReaderUrl("https://evil.example.com/trip", origin)).isFalse()
+        assertThat(OriginPolicy.isReaderUrl("https://team.cloudflareaccess.com/cdn-cgi/access/login", origin)).isFalse()
+        assertThat(OriginPolicy.isReaderUrl(null, origin)).isFalse()
+    }
 }

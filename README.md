@@ -87,8 +87,25 @@ watches and geotriggers, and the shell gets `geo.error` with `reason: "denied"` 
 ## Android Auto
 
 The app is an Android Auto **media source** (`automotive_app_desc.xml` declares `media`). The car
-screen shows the playback queue with play, pause and skip, and the current title. The browse root
-has two folders: "Now queued" and "Geotrigger stops".
+screen shows the playback queue with play, pause and skip, and the current title.
+
+**Library (ADR-0019).** The browse root has one folder per organization. Each folder lists the
+artifacts you can open (newest first, at most 200), with the category as subtitle. The list comes
+from `GET <origin>/api/library` with the WebView's cookies (4 s timeout) and is cached on disk, so
+the car shows the last list when the phone is offline. When the session is missing or expired the
+root shows one item: "Open the app on your phone to sign in". "Now queued" and "Geotrigger stops"
+follow when they have entries. If the car limits the number of root items, the organizations move
+into one "Library" folder.
+
+**Listen in the car.** Picking an artifact opens `<origin>/<id>?listen=autoplay`: in the viewer if
+it is on screen, otherwise in one hidden reader WebView owned by the media service. The shell
+starts Listen and reports its state with `media.session`; the media session (car, notification,
+Bluetooth) then shows the section title and voice, and play, pause, next, previous and stop are
+sent back as `media.command`. Listen started from the phone appears the same way. The native
+queue and Listen share the session: the last one that starts playing wins and the other pauses.
+While Listen plays, the viewer WebView is not paused, so narration continues with the screen off.
+Otherwise the viewer WebView is paused 15 s after the app leaves the screen (not while an artifact
+uses location). The reader is removed 30 s after Listen stops or 15 minutes after it pauses.
 
 A sideloaded app appears in Android Auto only in developer mode:
 
@@ -111,8 +128,18 @@ The viewer shell detects the app through the `ArtifactNative` host object. The p
   exactly the configured origin. Only top-level pages of that origin get it. The sandboxed artifact
   iframe has an opaque origin and never gets it. `addJavascriptInterface` is not used.
 - Messages are JSON strings with `"v": 1`. Shell to app: `hello`, `geo.watch`, `geo.unwatch`,
-  `audio.queue`, `audio.geotrigger`, `audio.stop`, `notify.show`, `played.ack`. App to shell:
-  `ready`, `geo.position`, `geo.error`, `audio.state`, `audio.played`, `error`.
+  `audio.queue`, `audio.geotrigger`, `audio.stop`, `notify.show`, `played.ack`, `media.session`.
+  App to shell: `ready`, `geo.position`, `geo.error`, `audio.state`, `audio.played`,
+  `media.command`, `error`. `ready.capabilities` is `geo.watch`, `audio.queue`,
+  `audio.geotrigger`, `notify`, `media.mirror`, `library`.
+- `media.session {artifactId, state: playing|paused|none, title, artist, album, actions}`: text
+  up to 200 characters (control characters become spaces), `actions` a subset of `play`, `pause`,
+  `next`, `previous`, `stop`. `media.command {artifactId, action}` goes only to the page that sent
+  the session.
+- The hidden Listen reader may only load `<origin>/<id>` and `<origin>/<id>?listen=autoplay`; all
+  other navigation is blocked (a redirect to the login page shows the sign-in message in the car).
+  Its bridge accepts only `hello` and `media.session`. It is the only WebView where media may play
+  without a tap, except the visible viewer during one `?listen=autoplay` load from the car.
 - Validation is strict: exact key sets, JSON types, `artifactId` matches `^[A-Za-z0-9_-]{1,64}$`,
   ids up to 64 characters, titles up to 120, text up to 1500, audio URLs same-origin only,
   `intervalMs` at least 15000, `radius_m` 500 to 10000, at most 50 geotrigger items. An invalid
@@ -202,11 +229,19 @@ build/emulator/server.sh down && build/emulator/run.sh down
   map and chat, so the test posts the shell's `data:ready` message for a bound concierge to the
   planner first. Each assertion prints PASS or FAIL; screenshots, UI dumps, logcat and
   `results.txt` go to `/tmp/emulator-test/`.
+- **Listen and the car library.** `server.sh` also runs `fake-tts.mjs` (a stand-in speech worker
+  that returns a quiet tone) and publishes `story.html`. Build with
+  `build/build.sh assembleDebug assembleDebugAndroidTest`, then run `build/emulator/test-listen.sh`.
+  It checks `/api/library` signed in and signed out, then runs the instrumentation test
+  `CarLibraryTest`, which browses the media service with the legacy `MediaBrowser` API (as Android
+  Auto does) and plays the story: in the hidden reader (next, pause, play, stop) and in the visible
+  viewer with the screen off. It screenshots the media notification (`listen-*-notification.png`)
+  and saves `dumpsys media_session`.
 
 ## Limitations
 
-- No device test yet of the foreground services, background playback with the screen off, or
-  Android Auto. The emulator test covers the viewer only.
+- No test yet in a real car or the Desktop Head Unit. The emulator covers the viewer, the media
+  library through the legacy browser API, the notification and screen-off Listen playback.
 - Phase 2 car surfaces (Car App Library templates) are not built.
 - Google sign-in through Cloudflare Access cannot work in the WebView. Use the email one-time PIN.
   Alternatives for later: an Access service token or a dedicated Access application for the app.

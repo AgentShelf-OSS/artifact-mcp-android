@@ -120,6 +120,22 @@ object OriginPolicy {
         return "$origin/$artifactId"
     }
 
+    /** Query that asks the viewer shell to start Listen once it is ready (ADR-0019). */
+    const val LISTEN_AUTOPLAY_QUERY = "listen=autoplay"
+
+    /** `<origin>/<artifactId>?listen=autoplay`, opened when an artifact is picked in the car library. */
+    fun listenUrl(origin: String, artifactId: String): String = viewerUrl(origin, artifactId) + "?" + LISTEN_AUTOPLAY_QUERY
+
+    /**
+     * True for the only URLs the hidden Listen reader may load: `<origin>/<artifactId>`, with or
+     * without `?listen=autoplay`. No other path, query or fragment.
+     */
+    fun isReaderUrl(url: String?, origin: String): Boolean {
+        if (url == null) return false
+        val id = viewerArtifactId(url, origin) ?: return false
+        return url == viewerUrl(origin, id) || url == listenUrl(origin, id)
+    }
+
     /**
      * Validate a launch target such as a notification tap. Only the exact viewer URL form
      * `<origin>/<artifactId>` is accepted; other apps can send intents to the exported

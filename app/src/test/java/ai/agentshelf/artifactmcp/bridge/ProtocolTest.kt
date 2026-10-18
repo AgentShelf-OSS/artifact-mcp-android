@@ -177,13 +177,67 @@ class ProtocolTest {
         invalid("""{"v":1,"type":"played.ack","artifactId":"a","ids":"s1"}""")
     }
 
-    @Test fun `ready reply lists the four capabilities`() {
+    private val session = """{"v":1,"type":"media.session","artifactId":"book","state":"playing","title":"Chapter 1","artist":"Narrator · Ava","album":"Frankenstein","actions":["play","pause","next","previous","stop"]}"""
+
+    @Test fun `media session parses with the shell's fields`() {
+        val m = ok(session) as Inbound.MediaSession
+        assertThat(m.artifactId).isEqualTo("book")
+        assertThat(m.state).isEqualTo(Protocol.MediaState.PLAYING)
+        assertThat(m.title).isEqualTo("Chapter 1")
+        assertThat(m.artist).isEqualTo("Narrator · Ava")
+        assertThat(m.album).isEqualTo("Frankenstein")
+        assertThat(m.actions).containsExactly(
+            Protocol.MediaAction.PLAY, Protocol.MediaAction.PAUSE, Protocol.MediaAction.NEXT,
+            Protocol.MediaAction.PREVIOUS, Protocol.MediaAction.STOP,
+        ).inOrder()
+    }
+
+    @Test fun `media session none carries empty strings and no actions`() {
+        val m = ok("""{"v":1,"type":"media.session","artifactId":"book","state":"none","title":"","artist":"","album":"","actions":[]}""") as Inbound.MediaSession
+        assertThat(m.state).isEqualTo(Protocol.MediaState.NONE)
+        assertThat(m.title).isEmpty()
+        assertThat(m.actions).isEmpty()
+        val paused = ok("""{"v":1,"type":"media.session","artifactId":"book","state":"paused","title":"T","artist":"","album":"","actions":["play"]}""") as Inbound.MediaSession
+        assertThat(paused.state).isEqualTo(Protocol.MediaState.PAUSED)
+        assertThat(paused.actions).containsExactly(Protocol.MediaAction.PLAY)
+    }
+
+    @Test fun `media session rejects unknown fields, states and actions`() {
+        invalid(session.replace("\"actions\"", "\"extra\":1,\"actions\""))
+        invalid(session.replace("\"playing\"", "\"buffering\""))
+        invalid(session.replace("\"stop\"]", "\"seek\"]"))
+        invalid(session.replace("\"stop\"]", "1]"))
+        invalid(session.replace("\"title\":\"Chapter 1\"", "\"title\":5"))
+        invalid(session.replace("\"title\":\"Chapter 1\"", "\"title\":\"${"x".repeat(201)}\""))
+        invalid(session.replace("\"artifactId\":\"book\"", "\"artifactId\":\"bad id\""))
+        invalid("""{"v":1,"type":"media.session","artifactId":"book"}""")
+        val error = invalid(session.replace("\"stop\"]", "\"stop\",\"play\",\"play\",\"play\",\"play\"]"))
+        assertThat(error.reason).isEqualTo(Protocol.Reason.LIMIT)
+    }
+
+    @Test fun `media session text accepts 200 characters and blanks control characters`() {
+        val m = ok(session.replace("Chapter 1", "x".repeat(200))) as Inbound.MediaSession
+        assertThat(m.title).hasLength(200)
+        val c = ok(session.replace("Chapter 1", "A\\u0007B")) as Inbound.MediaSession
+        assertThat(c.title).isEqualTo("A B")
+    }
+
+    @Test fun `media command carries exactly the protocol fields`() {
+        val o = Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.PAUSE)) as JsonObject
+        assertThat(o.keys).containsExactly("v", "type", "artifactId", "action")
+        assertThat((o["type"] as JsonPrimitive).content).isEqualTo("media.command")
+        assertThat((o["artifactId"] as JsonPrimitive).content).isEqualTo("book")
+        assertThat((o["action"] as JsonPrimitive).content).isEqualTo("pause")
+        assertThat(Protocol.MediaAction.entries.map { it.wire }).containsExactly("play", "pause", "next", "previous", "stop")
+    }
+
+    @Test fun `ready reply lists the capabilities`() {
         val o = Protocol.parseJson(Protocol.ready("0.1.0")) as JsonObject
         assertThat((o["v"] as JsonPrimitive).content).isEqualTo("1")
         assertThat((o["type"] as JsonPrimitive).content).isEqualTo("ready")
         assertThat((o["app"] as JsonPrimitive).content).isEqualTo("0.1.0")
         assertThat((o["capabilities"] as JsonArray).map { (it as JsonPrimitive).content })
-            .containsExactly("geo.watch", "audio.queue", "audio.geotrigger", "notify").inOrder()
+            .containsExactly("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library").inOrder()
     }
 
     @Test fun `outbound messages carry the protocol field names`() {
