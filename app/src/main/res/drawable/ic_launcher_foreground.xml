@@ -1,14 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Artifact MCP brand mark: the gold "A" from the web app icon (assets/icons/maskable-512.png),
+     sized inside the adaptive-icon safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- A page with a play mark: an artifact you can listen to. -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M38,30h24l10,10v38a2,2 0,0 1,-2 2h-32a2,2 0,0 1,-2 -2v-46a2,2 0,0 1,2 -2z" />
-    <path
-        android:fillColor="#0F2F45"
-        android:pathData="M47,48l14,8 -14,8z" />
+        android:fillColor="#D5A252"
+        android:fillType="evenOdd"
+        android:pathData="M50.35,30.05 L57.65,30.05 L75.59,78.05 L65.33,78.05 L60.8,64.55 L45.62,64.55 L41.29,78.05 L32.41,78.05 Z M53.19,40.69 L57.75,55.58 L48.87,55.58 Z" />
 </vector>
