@@ -23,8 +23,9 @@ mkdir -p /work/src
   --exclude=./dist --exclude=./.git --exclude=./.kotlin -cf - .) | tar -xf - -C /work/src
 cd /work/src
 
+# AGP creates unit-test tasks only for the debug build type, so the release gate runs those.
 ./gradlew --no-daemon --console=plain --no-build-cache --project-cache-dir /work/project-cache \
-  lintRelease testReleaseUnitTest assembleRelease
+  lintRelease testDebugUnitTest assembleRelease
 
 version=$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' app/build.gradle.kts)
 apk=app/build/outputs/apk/release/app-release.apk
