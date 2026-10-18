@@ -90,5 +90,14 @@
         <receiver
             android:name=".geo.LocationStopReceiver"
             android:exported="false" />
+
+        <!-- Not needed for a sideloaded app (it serves adb/benchmark profile installs); removing
+             it keeps the exported surface to the launcher activity and the media service, plus
+             Media3's BluetoothValidationActivity, which only the system Bluetooth stack
+             (BLUETOOTH_PRIVILEGED) can start. -->
+        <receiver
+            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+            tools:ignore="MissingClass"
+            tools:node="remove" />
     </application>
 </manifest>
