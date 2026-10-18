@@ -6,7 +6,7 @@ that a web page cannot have on Android: location with the screen off, location-t
 narration, a media queue that Android Auto can control, and local notifications.
 
 The design is recorded in
-[ADR-0018: Native Android app and car surfaces](https://github.com/AgentShelf-OSS/artifact-mcp/blob/docs/adr-0018-native-android/docs/adr/0018-native-android-app-and-car-surfaces.md)
+[ADR-0018: Native Android app and car surfaces](https://github.com/AgentShelf-OSS/artifact-mcp/blob/master/docs/adr/0018-native-android-app-and-car-surfaces.md)
 (in `docs/adr/` of the server repository). This repository is **Phase 1**: viewer, login and the
 native bridges. Phase 2 (car screens built from Car App Library templates) is not built yet.
 
