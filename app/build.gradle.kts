@@ -19,8 +19,8 @@ android {
         applicationId = "ai.agentshelf.artifactmcp"
         minSdk = 29
         targetSdk = 37
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.2.1"
         // Emulator-only media browser test (build/emulator/test-listen.sh); not run in CI.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer (Android 13+): the system tints this shape. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M50.35,30.05 L57.65,30.05 L75.59,78.05 L65.33,78.05 L60.8,64.55 L45.62,64.55 L41.29,78.05 L32.41,78.05 Z M53.19,40.69 L57.75,55.58 L48.87,55.58 Z" />
+</vector>

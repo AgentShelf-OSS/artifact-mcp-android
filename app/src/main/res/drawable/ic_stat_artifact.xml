@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Status bar and media notification icon: the brand "A" as a white silhouette. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -6,5 +7,6 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M6,2h9l5,5v14a1,1 0,0 1,-1 1h-13a1,1 0,0 1,-1 -1v-18a1,1 0,0 1,1 -1zM10,10v7l6,-3.5z" />
+        android:fillType="evenOdd"
+        android:pathData="M10.48,2.02 L13.52,2.02 L20.99,22.02 L16.72,22.02 L14.83,16.39 L8.51,16.39 L6.7,22.02 L3.01,22.02 Z M11.66,6.46 L13.56,12.66 L9.86,12.66 Z" />
 </vector>
