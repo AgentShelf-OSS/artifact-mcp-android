@@ -14,6 +14,7 @@ import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -86,7 +87,9 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         super.onCreate(savedInstanceState)
         app = application as ArtifactApp
         val configured = app.originStore.origin
-        if (configured == null) {
+        // Re-check the stored origin with this build's rules: a release build never loads an
+        // http origin, even one stored by a debug build.
+        if (configured == null || !OriginPolicy.isAccepted(configured, allowLoopbackHttp = BuildConfig.DEBUG)) {
             startActivity(Intent(this, SetupActivity::class.java))
             finish()
             return
@@ -98,10 +101,16 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         }
         container = FrameLayout(this)
         setContentView(container)
+        // Edge-to-edge is enforced on recent Android: keep the viewer clear of the status bar,
+        // display cutout, navigation bar and keyboard, and tint the status-bar strip to match.
+        applyChrome()
         ViewCompat.setOnApplyWindowInsetsListener(container) { view, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.ime())
-            view.setPadding(bars.left, 0, bars.right, bars.bottom)
-            insets
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime(),
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            WindowInsetsCompat.CONSUMED
         }
         supportActionBar?.title = getString(R.string.app_name)
         createWebView()
@@ -147,10 +156,24 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         webView = view
     }
 
+    /** Strip colour and bar icon colour for the current light or dark theme. */
+    private fun applyChrome() {
+        container.setBackgroundColor(ContextCompat.getColor(this, R.color.viewer_chrome))
+        SystemBars.matchIcons(window, container, SystemBars.isNight(this))
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // uiMode is in android:configChanges (the WebView must survive a theme switch), so the
+        // activity is not recreated and the chrome has to follow the new light or dark theme here.
+        if (::container.isInitialized) applyChrome()
+    }
+
     private fun harden(settings: WebSettings) {
         settings.allowFileAccess = false
         settings.allowContentAccess = false
-        settings.setGeolocationEnabled(false)
+        // Geolocation is answered per origin in onGeolocationPermissionsShowPrompt.
+        settings.setGeolocationEnabled(true)
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         settings.mediaPlaybackRequiresUserGesture = true
         if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
@@ -380,8 +403,26 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         }
 
         override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback) {
-            // Location reaches artifacts only through the shell-brokered geo.watch bridge.
-            callback.invoke(origin, false, false)
+            // Only the configured server's viewer shell may ask. The sandboxed artifact frame has an
+            // opaque origin and no geolocation of its own; the shell still asks the per-artifact
+            // question (artifact-mcp ADR-0016) before any position reaches an artifact.
+            val server = this@MainActivity.origin
+            if (origin == null || !OriginPolicy.isSameOrigin(origin, server)) {
+                callback.invoke(origin, false, false)
+                return
+            }
+            if (LocationService.hasLocationPermission(this@MainActivity)) {
+                callback.invoke(origin, true, false)
+                return
+            }
+            val previous = permissionCallback
+            permissionCallback = {
+                previous?.invoke()
+                callback.invoke(origin, LocationService.hasLocationPermission(this@MainActivity), false)
+            }
+            permissionLauncher.launch(
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+            )
         }
 
         override fun onPermissionRequest(request: PermissionRequest) {

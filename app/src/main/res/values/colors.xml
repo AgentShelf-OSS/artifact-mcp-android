@@ -2,4 +2,6 @@
 <resources>
     <color name="brand">#1F5F8B</color>
     <color name="launcher_background">#0F2F45</color>
+    <!-- Status-bar strip behind the viewer; matches the viewer header. -->
+    <color name="viewer_chrome">#EEF0EE</color>
 </resources>

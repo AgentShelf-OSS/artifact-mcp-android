@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The viewer has no app bar, and phones with on-screen navigation have no menu key, so
+     Settings (change server, artifact permissions, sign out) is reachable from the launcher:
+     long-press the app icon. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="settings"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_settings"
+        android:shortcutShortLabel="@string/settings_title">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="ai.agentshelf.artifactmcp"
+            android:targetClass="ai.agentshelf.artifactmcp.ui.SettingsActivity" />
+    </shortcut>
+</shortcuts>

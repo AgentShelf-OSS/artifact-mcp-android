@@ -1,6 +1,7 @@
 package ai.agentshelf.artifactmcp.ui
 
 import ai.agentshelf.artifactmcp.ArtifactApp
+import ai.agentshelf.artifactmcp.BuildConfig
 import ai.agentshelf.artifactmcp.R
 import ai.agentshelf.artifactmcp.config.OriginPolicy
 import android.content.Intent
@@ -12,8 +13,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
@@ -64,17 +63,13 @@ class SetupActivity : AppCompatActivity() {
             setPadding(0, pad, 0, 0)
         })
         val scroll = ScrollView(this).apply { addView(column) }
-        ViewCompat.setOnApplyWindowInsetsListener(scroll) { v, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
-            v.setPadding(bars.left, 0, bars.right, bars.bottom)
-            insets
-        }
         setContentView(scroll)
+        SystemBars.padBelowActionBar(this, scroll, includeIme = true)
     }
 
     private fun submit() {
         val app = application as ArtifactApp
-        when (val parsed = OriginPolicy.normalize(input.text?.toString().orEmpty())) {
+        when (val parsed = OriginPolicy.normalize(input.text?.toString().orEmpty(), allowLoopbackHttp = BuildConfig.DEBUG)) {
             is OriginPolicy.Parsed.Invalid -> layout.error = getString(
                 when (parsed.reason) {
                     "https_required" -> R.string.setup_error_https

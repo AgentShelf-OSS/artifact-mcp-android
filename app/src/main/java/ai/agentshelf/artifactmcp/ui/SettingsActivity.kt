@@ -14,8 +14,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 /** Server origin, per-artifact capability grants with revoke, active location use, sign out. */
@@ -33,12 +31,8 @@ class SettingsActivity : AppCompatActivity() {
             setPadding(pad, pad, pad, pad)
         }
         val scroll = ScrollView(this).apply { addView(column) }
-        ViewCompat.setOnApplyWindowInsetsListener(scroll) { v, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
-            v.setPadding(bars.left, 0, bars.right, bars.bottom)
-            insets
-        }
         setContentView(scroll)
+        SystemBars.padBelowActionBar(this, scroll, includeIme = false)
         app.hub.addChangeListener(refresh)
     }
 
