@@ -32,6 +32,43 @@ class OriginPolicyTest {
         assertThat(reason("file:///sdcard/x")).isEqualTo("https_required")
     }
 
+    @Test fun `loopback http is accepted only when allowed (debug builds)`() {
+        fun debug(input: String) = OriginPolicy.normalize(input, allowLoopbackHttp = true)
+        assertThat(debug("http://localhost:8480")).isEqualTo(Parsed.Valid("http://localhost:8480"))
+        assertThat(debug("http://127.0.0.1:8480/")).isEqualTo(Parsed.Valid("http://127.0.0.1:8480"))
+        assertThat(debug("http://LOCALHOST")).isEqualTo(Parsed.Valid("http://localhost"))
+        assertThat(debug("https://artifact.example.com")).isEqualTo(Parsed.Valid(origin))
+        // Never another host over http, and the usual path and userinfo rules still apply.
+        assertThat(debug("http://artifact.example.com")).isEqualTo(Parsed.Invalid("https_required"))
+        assertThat(debug("http://localhost.evil.net:8480")).isEqualTo(Parsed.Invalid("https_required"))
+        assertThat(debug("http://10.0.2.2:8480")).isEqualTo(Parsed.Invalid("https_required"))
+        assertThat(debug("http://localhost:8480/x")).isEqualTo(Parsed.Invalid("path"))
+        assertThat(debug("http://u:p@localhost:8480")).isEqualTo(Parsed.Invalid("userinfo"))
+    }
+
+    @Test fun `release builds reject a loopback http origin`() {
+        // Release builds pass BuildConfig.DEBUG == false (SetupActivity and MainActivity); the
+        // default is the same. Release resources also forbid cleartext (network_security_config).
+        for (input in listOf("http://localhost:8480", "http://127.0.0.1:8480", "http://localhost")) {
+            assertThat(OriginPolicy.normalize(input, allowLoopbackHttp = false)).isEqualTo(Parsed.Invalid("https_required"))
+            assertThat(reason(input)).isEqualTo("https_required")
+        }
+        // A stored http origin (for example left by a debug build) is not accepted by a release viewer.
+        assertThat(OriginPolicy.isAccepted("http://localhost:8480", allowLoopbackHttp = false)).isFalse()
+        assertThat(OriginPolicy.isAccepted("http://localhost:8480", allowLoopbackHttp = true)).isTrue()
+        assertThat(OriginPolicy.isAccepted(origin)).isTrue()
+        assertThat(OriginPolicy.isAccepted("https://Artifact.example.com/")).isFalse()
+    }
+
+    @Test fun `a loopback http origin keeps its own pages in the app`() {
+        val local = "http://localhost:8480"
+        assertThat(OriginPolicy.classifyNavigation("$local/abc", local, false)).isEqualTo(Navigation.IN_APP)
+        assertThat(OriginPolicy.classifyNavigation("http://localhost:9999/abc", local, false)).isEqualTo(Navigation.EXTERNAL)
+        assertThat(OriginPolicy.classifyNavigation("http://example.com/", local, false)).isEqualTo(Navigation.EXTERNAL)
+        assertThat(OriginPolicy.viewerArtifactId("$local/trip_1", local)).isEqualTo("trip_1")
+        assertThat(OriginPolicy.isViewerTarget("$local/trip_1", local)).isTrue()
+    }
+
     @Test fun `same origin comparison`() {
         assertThat(OriginPolicy.isSameOrigin("https://artifact.example.com/abc?x=1", origin)).isTrue()
         assertThat(OriginPolicy.isSameOrigin("https://ARTIFACT.example.com:443/abc", origin)).isTrue()

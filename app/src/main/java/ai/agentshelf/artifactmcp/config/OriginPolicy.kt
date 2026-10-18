@@ -24,8 +24,17 @@ object OriginPolicy {
         data class Invalid(val reason: String) : Parsed
     }
 
-    /** Validate user input for the server origin. Only an https origin without path is accepted. */
-    fun normalize(input: String): Parsed {
+    /** Hosts a debug build may reach over plain http (a local test server through `adb reverse`). */
+    private val LOOPBACK_HOSTS = setOf("localhost", "127.0.0.1")
+
+    /**
+     * Validate user input for the server origin. Only an https origin without path is accepted.
+     *
+     * [allowLoopbackHttp] additionally accepts `http://localhost:<port>` and
+     * `http://127.0.0.1:<port>` for emulator tests. Only debug builds pass true
+     * (`BuildConfig.DEBUG`); a release build always requires https.
+     */
+    fun normalize(input: String, allowLoopbackHttp: Boolean = false): Parsed {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return Parsed.Invalid("empty")
         val uri = try {
@@ -34,7 +43,9 @@ object OriginPolicy {
             return Parsed.Invalid("malformed")
         }
         if (!uri.isAbsolute || uri.isOpaque) return Parsed.Invalid("malformed")
-        if (!"https".equals(uri.scheme, ignoreCase = true)) return Parsed.Invalid("https_required")
+        val loopbackHttp = allowLoopbackHttp && "http".equals(uri.scheme, ignoreCase = true) &&
+            uri.host?.lowercase(Locale.ROOT) in LOOPBACK_HOSTS
+        if (!"https".equals(uri.scheme, ignoreCase = true) && !loopbackHttp) return Parsed.Invalid("https_required")
         if (uri.rawUserInfo != null) return Parsed.Invalid("userinfo")
         val host = uri.host?.lowercase(Locale.ROOT) ?: return Parsed.Invalid("malformed")
         if (host.isEmpty()) return Parsed.Invalid("malformed")
@@ -43,8 +54,13 @@ object OriginPolicy {
         if (uri.rawQuery != null || uri.rawFragment != null) return Parsed.Invalid("path")
         val port = uri.port
         if (port == 0 || port > 65535) return Parsed.Invalid("port")
+        if (loopbackHttp) return Parsed.Valid(if (port == -1 || port == 80) "http://$host" else "http://$host:$port")
         return Parsed.Valid(serialize(host, port))
     }
+
+    /** True when [origin] is already in the normalized form that [normalize] accepts. */
+    fun isAccepted(origin: String, allowLoopbackHttp: Boolean = false): Boolean =
+        normalize(origin, allowLoopbackHttp) == Parsed.Valid(origin)
 
     /** Origin of an absolute URL, or null when it is not http(s). */
     fun originOf(url: String): String? {
@@ -149,7 +165,8 @@ object OriginPolicy {
                     else -> Navigation.EXTERNAL
                 }
             }
-            "http" -> Navigation.EXTERNAL
+            // Only a debug build can have an http (loopback) origin; see normalize.
+            "http" -> if (originOf(url) == origin) Navigation.IN_APP else Navigation.EXTERNAL
             "geo", "google.navigation", "mailto", "tel", "sms" -> Navigation.EXTERNAL
             else -> Navigation.DENY
         }

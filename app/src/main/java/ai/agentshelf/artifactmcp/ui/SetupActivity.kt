@@ -1,6 +1,7 @@
 package ai.agentshelf.artifactmcp.ui
 
 import ai.agentshelf.artifactmcp.ArtifactApp
+import ai.agentshelf.artifactmcp.BuildConfig
 import ai.agentshelf.artifactmcp.R
 import ai.agentshelf.artifactmcp.config.OriginPolicy
 import android.content.Intent
@@ -74,7 +75,7 @@ class SetupActivity : AppCompatActivity() {
 
     private fun submit() {
         val app = application as ArtifactApp
-        when (val parsed = OriginPolicy.normalize(input.text?.toString().orEmpty())) {
+        when (val parsed = OriginPolicy.normalize(input.text?.toString().orEmpty(), allowLoopbackHttp = BuildConfig.DEBUG)) {
             is OriginPolicy.Parsed.Invalid -> layout.error = getString(
                 when (parsed.reason) {
                     "https_required" -> R.string.setup_error_https

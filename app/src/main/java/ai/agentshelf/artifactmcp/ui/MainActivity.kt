@@ -87,7 +87,9 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         super.onCreate(savedInstanceState)
         app = application as ArtifactApp
         val configured = app.originStore.origin
-        if (configured == null) {
+        // Re-check the stored origin with this build's rules: a release build never loads an
+        // http origin, even one stored by a debug build.
+        if (configured == null || !OriginPolicy.isAccepted(configured, allowLoopbackHttp = BuildConfig.DEBUG)) {
             startActivity(Intent(this, SetupActivity::class.java))
             finish()
             return
