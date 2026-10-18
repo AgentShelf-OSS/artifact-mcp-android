@@ -41,6 +41,7 @@ import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebMessageCompat
@@ -98,10 +99,17 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         }
         container = FrameLayout(this)
         setContentView(container)
+        // Edge-to-edge is enforced on recent Android: keep the viewer clear of the status bar,
+        // display cutout, navigation bar and keyboard, and tint the status-bar strip to match.
+        container.setBackgroundColor(ContextCompat.getColor(this, R.color.viewer_chrome))
+        WindowCompat.getInsetsController(window, container).isAppearanceLightStatusBars = !isNightMode()
         ViewCompat.setOnApplyWindowInsetsListener(container) { view, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.ime())
-            view.setPadding(bars.left, 0, bars.right, bars.bottom)
-            insets
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime(),
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            WindowInsetsCompat.CONSUMED
         }
         supportActionBar?.title = getString(R.string.app_name)
         createWebView()
@@ -147,10 +155,15 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         webView = view
     }
 
+    private fun isNightMode(): Boolean =
+        (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+
     private fun harden(settings: WebSettings) {
         settings.allowFileAccess = false
         settings.allowContentAccess = false
-        settings.setGeolocationEnabled(false)
+        // Geolocation is answered per origin in onGeolocationPermissionsShowPrompt.
+        settings.setGeolocationEnabled(true)
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         settings.mediaPlaybackRequiresUserGesture = true
         if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
@@ -380,8 +393,26 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         }
 
         override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback) {
-            // Location reaches artifacts only through the shell-brokered geo.watch bridge.
-            callback.invoke(origin, false, false)
+            // Only the configured server's viewer shell may ask. The sandboxed artifact frame has an
+            // opaque origin and no geolocation of its own; the shell still asks the per-artifact
+            // question (artifact-mcp ADR-0016) before any position reaches an artifact.
+            val server = this@MainActivity.origin
+            if (origin == null || !OriginPolicy.isSameOrigin(origin, server)) {
+                callback.invoke(origin, false, false)
+                return
+            }
+            if (LocationService.hasLocationPermission(this@MainActivity)) {
+                callback.invoke(origin, true, false)
+                return
+            }
+            val previous = permissionCallback
+            permissionCallback = {
+                previous?.invoke()
+                callback.invoke(origin, LocationService.hasLocationPermission(this@MainActivity), false)
+            }
+            permissionLauncher.launch(
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+            )
         }
 
         override fun onPermissionRequest(request: PermissionRequest) {
