@@ -14,7 +14,19 @@ import ai.agentshelf.artifactmcp.state.PlayedStore
 interface ShellConnection {
     /** Artifact id of the viewer page (`<origin>/<id>`), or null on the gallery and other pages. */
     val pageArtifactId: String?
+
+    /**
+     * Identity of the WebView that sent the message (stable across messages from one page
+     * view), or null. Used to tie a mirrored media session to its page.
+     */
+    val host: Any? get() = null
+
     fun post(message: String)
+}
+
+/** Receives the viewer's Listen state (`media.session`) for the native media session. */
+fun interface MediaSessionSink {
+    fun onMediaSession(message: Protocol.Inbound.MediaSession, connection: ShellConnection)
 }
 
 /** Asks the user (native dialog and OS runtime permissions) before a capability is used. */
@@ -54,6 +66,7 @@ class BridgeHub(
     private val location: LocationControl,
     private val audio: AudioControl,
     private val notifier: ArtifactNotifier,
+    private val media: MediaSessionSink = MediaSessionSink { _, _ -> },
 ) {
     companion object {
         const val MAX_WATCHES_PER_ARTIFACT = 4
@@ -107,13 +120,33 @@ class BridgeHub(
 
     // ---- shell -> app --------------------------------------------------------------------
 
-    fun onShellMessage(raw: String, connection: ShellConnection) {
-        shell = connection
+    /**
+     * Handle one message from a viewer page.
+     *
+     * [reader] is true for the hidden Listen reader that the media service opens for the car
+     * library (ADR-0019). A reader page may only say `hello` and report `media.session`; every
+     * other capability is denied, it does not become the page that native events go to, and
+     * its `hello` does not consume notices or played events meant for the visible viewer.
+     */
+    fun onShellMessage(raw: String, connection: ShellConnection, reader: Boolean = false) {
+        if (!reader) shell = connection
         val currentOrigin = origin() ?: return
         when (val parsed = Protocol.parse(raw, currentOrigin)) {
             is Protocol.ParseResult.Invalid ->
                 connection.post(Protocol.error(parsed.artifactId, parsed.requestId, parsed.reason))
-            is Protocol.ParseResult.Ok -> dispatch(parsed.message, connection)
+            is Protocol.ParseResult.Ok -> if (reader) dispatchReader(parsed.message, connection) else dispatch(parsed.message, connection)
+        }
+    }
+
+    private fun dispatchReader(message: Inbound, connection: ShellConnection) {
+        when (message) {
+            Inbound.Hello -> connection.post(Protocol.ready(appVersion))
+            is Inbound.MediaSession -> if (message.artifactId == connection.pageArtifactId) {
+                media.onMediaSession(message, connection)
+            } else {
+                connection.post(Protocol.error(message.artifactId, null, Reason.DENIED))
+            }
+            else -> connection.post(Protocol.error(message.artifactId, requestIdOf(message), Reason.DENIED))
         }
     }
 
@@ -138,6 +171,7 @@ class BridgeHub(
             is Inbound.AudioStop -> audio.stop(message.artifactId)
             is Inbound.NotifyShow -> notify(message, connection)
             is Inbound.PlayedAck -> played.acknowledge(message.artifactId, message.ids)
+            is Inbound.MediaSession -> media.onMediaSession(message, connection)
         }
     }
 

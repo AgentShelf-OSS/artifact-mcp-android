@@ -34,8 +34,10 @@ object Protocol {
     const val MAX_INTERVAL_MS = 3_600_000L
     const val MIN_RADIUS_M = 500.0
     const val MAX_RADIUS_M = 10_000.0
+    const val MAX_MEDIA_TEXT = 200
+    const val MAX_MEDIA_ACTIONS = 8
 
-    val CAPABILITIES = listOf("geo.watch", "audio.queue", "audio.geotrigger", "notify")
+    val CAPABILITIES = listOf("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library")
 
     private val ARTIFACT_ID = Regex("^[A-Za-z0-9_-]{1,64}$")
     private val VOICE = Regex("^[A-Za-z0-9_-]{1,64}$")
@@ -60,6 +62,32 @@ object Protocol {
         val url: String?,
         val voice: String?,
     )
+
+    /** State of the viewer's Listen player, as mirrored by `media.session`. */
+    enum class MediaState(val wire: String) {
+        PLAYING("playing"),
+        PAUSED("paused"),
+        NONE("none"),
+        ;
+
+        companion object {
+            fun of(wire: String): MediaState? = entries.firstOrNull { it.wire == wire }
+        }
+    }
+
+    /** Listen controls, in `media.session.actions` and `media.command.action`. */
+    enum class MediaAction(val wire: String) {
+        PLAY("play"),
+        PAUSE("pause"),
+        NEXT("next"),
+        PREVIOUS("previous"),
+        STOP("stop"),
+        ;
+
+        companion object {
+            fun of(wire: String): MediaAction? = entries.firstOrNull { it.wire == wire }
+        }
+    }
 
     data class TriggerItem(val item: AudioItem, val lat: Double, val lon: Double, val radiusM: Double)
 
@@ -97,6 +125,16 @@ object Protocol {
         ) : Inbound
 
         data class PlayedAck(override val artifactId: String, val ids: List<String>) : Inbound
+
+        /** The viewer's Listen player changed (ADR-0019 mirror). */
+        data class MediaSession(
+            override val artifactId: String,
+            val state: MediaState,
+            val title: String,
+            val artist: String,
+            val album: String,
+            val actions: Set<MediaAction>,
+        ) : Inbound
     }
 
     sealed interface ParseResult {
@@ -199,8 +237,37 @@ object Protocol {
                 }
                 Inbound.PlayedAck(artifactId(o), ids)
             }
+            "media.session" -> {
+                keys(o, "v", "type", "artifactId", "state", "title", "artist", "album", "actions")
+                val state = MediaState.of(string(o, "state")) ?: throw Reject()
+                val actions = (o["actions"] ?: JsonArray(emptyList())) as? JsonArray ?: throw Reject()
+                if (actions.size > MAX_MEDIA_ACTIONS) throw Reject(Reason.LIMIT)
+                val parsedActions = actions.map { element ->
+                    val p = element as? JsonPrimitive ?: throw Reject()
+                    if (!p.isString) throw Reject()
+                    MediaAction.of(p.content) ?: throw Reject()
+                }.toCollection(LinkedHashSet())
+                Inbound.MediaSession(
+                    artifactId = artifactId(o),
+                    state = state,
+                    title = mediaText(o, "title"),
+                    artist = mediaText(o, "artist"),
+                    album = mediaText(o, "album"),
+                    actions = if (state == MediaState.NONE) emptySet() else parsedActions,
+                )
+            }
             else -> throw Reject(Reason.UNSUPPORTED)
         }
+    }
+
+    /**
+     * Optional display text of `media.session`: at most [MAX_MEDIA_TEXT] characters. Control
+     * characters are replaced by spaces (the text is only shown, never interpreted).
+     */
+    private fun mediaText(o: JsonObject, key: String): String {
+        val value = optionalString(o, key) ?: return ""
+        if (value.length > MAX_MEDIA_TEXT) throw Reject()
+        return value.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim()
     }
 
     private fun audioItem(o: JsonObject, origin: String): AudioItem {
@@ -321,6 +388,11 @@ object Protocol {
         put("artifactId", artifactId)
         put("id", id)
         put("at", at)
+    }
+
+    fun mediaCommand(artifactId: String, action: MediaAction): String = envelope("media.command") {
+        put("artifactId", artifactId)
+        put("action", action.wire)
     }
 
     fun error(artifactId: String?, requestId: String?, reason: String): String = envelope("error") {

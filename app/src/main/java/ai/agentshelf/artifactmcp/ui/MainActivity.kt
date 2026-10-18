@@ -7,6 +7,8 @@ import ai.agentshelf.artifactmcp.bridge.ConsentGate
 import ai.agentshelf.artifactmcp.bridge.ShellConnection
 import ai.agentshelf.artifactmcp.config.OriginPolicy
 import ai.agentshelf.artifactmcp.geo.LocationService
+import ai.agentshelf.artifactmcp.listen.ListenViewer
+import ai.agentshelf.artifactmcp.listen.WebViewPausePolicy
 import ai.agentshelf.artifactmcp.notify.Notifications
 import ai.agentshelf.artifactmcp.state.Capability
 import android.Manifest
@@ -19,6 +21,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.view.Menu
 import android.view.MenuItem
@@ -45,7 +49,6 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebMessageCompat
-import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -58,7 +61,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
  * The sandboxed artifact iframe has an opaque origin and never receives it.
  * `addJavascriptInterface` is not used.
  */
-class MainActivity : AppCompatActivity(), ConsentGate {
+class MainActivity : AppCompatActivity(), ConsentGate, ListenViewer {
     companion object {
         const val BRIDGE_OBJECT = "ArtifactNative"
     }
@@ -70,6 +73,16 @@ class MainActivity : AppCompatActivity(), ConsentGate {
 
     /** True after the viewer left the origin for the Access login page, until it returns. */
     private var loginInProgress = false
+
+    /** The `?listen=autoplay` URL this viewer is loading for a car library pick, if any. */
+    private var autoplayUrl: String? = null
+
+    private val main = Handler(Looper.getMainLooper())
+    private var started = false
+    private var viewPaused = false
+    private var timersPaused = false
+    private val applyPause = Runnable { applyBackgroundPause() }
+    private val onListenChanged: () -> Unit = { onListenChanged() }
 
     private data class ConsentRequest(
         val artifactId: String,
@@ -115,6 +128,7 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         supportActionBar?.title = getString(R.string.app_name)
         createWebView()
         app.hub.consent = this
+        app.listen.addListener(onListenChanged)
         onBackPressedDispatcher.addCallback(this) {
             val view = webView
             if (view != null && view.canGoBack()) {
@@ -169,17 +183,7 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         if (::container.isInitialized) applyChrome()
     }
 
-    private fun harden(settings: WebSettings) {
-        settings.allowFileAccess = false
-        settings.allowContentAccess = false
-        // Geolocation is answered per origin in onGeolocationPermissionsShowPrompt.
-        settings.setGeolocationEnabled(true)
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-        settings.mediaPlaybackRequiresUserGesture = true
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
-            WebSettingsCompat.setSafeBrowsingEnabled(settings, true)
-        }
-    }
+    private fun harden(settings: WebSettings) = WebViewHardening.harden(settings)
 
     private fun onBridgeMessage(
         source: WebView,
@@ -196,6 +200,7 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         val page = OriginPolicy.viewerArtifactId(source.url, origin)
         app.hub.onShellMessage(data, object : ShellConnection {
             override val pageArtifactId: String? = page
+            override val host: Any = source
 
             // Only reachable from a WEB_MESSAGE_LISTENER callback, so the feature is present.
             @SuppressLint("RequiresFeature")
@@ -224,14 +229,96 @@ class MainActivity : AppCompatActivity(), ConsentGate {
             return
         }
         app.hub.consent = this
+        app.listen.viewer = this
     }
 
     override fun onPause() {
         CookieManager.getInstance().flush()
+        if (app.listen.viewer === this) app.listen.viewer = null
         super.onPause()
     }
 
+    override fun onStart() {
+        super.onStart()
+        started = true
+        main.removeCallbacks(applyPause)
+        resumeWebView()
+    }
+
+    override fun onStop() {
+        started = false
+        scheduleBackgroundPause()
+        super.onStop()
+    }
+
+    // ---- Listen (ADR-0019) ---------------------------------------------------------------------
+
+    override val host: Any get() = webView ?: this
+
+    /**
+     * A car library pick while this viewer is on screen: load `?listen=autoplay` here. The shell
+     * starts Listen without a tap, so the gesture requirement is lifted for this one page load
+     * only and restored as soon as the WebView starts loading any other page.
+     */
+    override fun openListen(url: String) {
+        val view = webView ?: return
+        if (!OriginPolicy.isReaderUrl(url, origin)) return
+        autoplayUrl = url
+        view.settings.mediaPlaybackRequiresUserGesture = false
+        view.loadUrl(url)
+    }
+
+    private fun onListenChanged() {
+        if (started) return
+        if (app.listen.isPlayingOn(webView) || app.listen.reader != null) {
+            main.removeCallbacks(applyPause)
+            resumeWebView()
+        } else {
+            scheduleBackgroundPause()
+        }
+    }
+
+    private fun scheduleBackgroundPause() {
+        main.removeCallbacks(applyPause)
+        main.postDelayed(applyPause, WebViewPausePolicy.GRACE_MS)
+    }
+
+    /** Pause the viewer in the background unless Listen plays in it or location is in use. */
+    private fun applyBackgroundPause() {
+        val view = webView ?: return
+        val locationInUse = app.hub.activeWatches.isNotEmpty()
+        if (!viewPaused && WebViewPausePolicy.pauseView(started, app.listen.isPlayingOn(view), locationInUse)) {
+            view.onPause()
+            viewPaused = true
+        }
+        if (!timersPaused &&
+            WebViewPausePolicy.pauseTimers(started, app.listen.isPlaying, app.listen.reader != null, locationInUse)
+        ) {
+            view.pauseTimers()
+            timersPaused = true
+        }
+    }
+
+    private fun resumeWebView() {
+        val view = webView ?: return
+        if (viewPaused) {
+            view.onResume()
+            viewPaused = false
+        }
+        if (timersPaused) {
+            view.resumeTimers()
+            timersPaused = false
+        }
+    }
+
     override fun onDestroy() {
+        main.removeCallbacks(applyPause)
+        if (::app.isInitialized) {
+            app.listen.removeListener(onListenChanged)
+            if (app.listen.viewer === this) app.listen.viewer = null
+            webView?.let { app.listen.onHostGone(it) }
+            if (timersPaused) webView?.resumeTimers()
+        }
         if (app.hub.consent === this) app.hub.consent = null
         consentQueue.forEach { it.onResult(false) }
         consentQueue.clear()
@@ -334,6 +421,11 @@ class MainActivity : AppCompatActivity(), ConsentGate {
 
         override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
             app.hub.onPageStarted()
+            app.listen.onHostGone(view)
+            if (url != autoplayUrl) {
+                autoplayUrl = null
+                view.settings.mediaPlaybackRequiresUserGesture = true
+            }
         }
 
         override fun onPageFinished(view: WebView, url: String) {
@@ -346,6 +438,8 @@ class MainActivity : AppCompatActivity(), ConsentGate {
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
             // The renderer crashed or was killed: drop this WebView and start a fresh one.
             app.hub.onPageStarted()
+            app.listen.onHostGone(view)
+            autoplayUrl = null
             container.removeView(view)
             view.destroy()
             webView = null
