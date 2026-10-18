@@ -12,9 +12,10 @@ native bridges. Phase 2 (car screens built from Car App Library templates) is no
 
 ## Status
 
-Version 0.1.0 is a pre-release. All JVM unit tests pass. **No emulator or device test was run
-during development**: no emulator is available in the build environment. Treat the first install
-as a field test.
+Version 0.1.0 is a pre-release. All JVM unit tests pass. The viewer (insets, geolocation, the
+bridge handshake, the keyboard) is tested on a headless emulator; see "Emulator test". The
+foreground services, playback and Android Auto are not tested on a device yet. Treat the first
+install as a field test.
 
 ## Install (sideload)
 
@@ -36,6 +37,9 @@ Requirements: Android 10 (API 29) or later. The app targets API 37.
 The app asks for the server origin, for example `https://artifact.example.com`. Only `https://`
 origins without a path are accepted. Nothing is hard-coded. Change the server later in
 **Settings > Change server**. A change of server signs you out and clears local data.
+
+The viewer has no app bar. To open **Settings**, long-press the app icon and choose **Settings**
+(a launcher shortcut).
 
 ## Signing in
 
@@ -155,12 +159,54 @@ navigation rules, geotrigger distance and first-entry logic, persistence of play
 notices, consent grants and revoke, speech request construction, and notification intent
 targets. Run them with `build/build.sh testDebugUnitTest`.
 
-Not tested: WebView behaviour, the foreground services, ExoPlayer and Media3 on a device, and
-Android Auto. These need a device or an emulator.
+Not tested by the JVM tests: WebView behaviour, the foreground services, ExoPlayer and Media3 on a
+device, and Android Auto. The emulator test below covers the viewer part.
+
+### Emulator test
+
+`build/emulator/` runs the debug app on a headless Android emulator in a container and checks the
+viewer against a local Artifact MCP server. It needs a Docker host with `/dev/kvm`, Node 22 or later
+on that host, and a checkout of the server repository.
+
+```sh
+build/build.sh                                   # debug APK
+build/emulator/run.sh up                         # emulator; downloads the SDK parts once
+ARTIFACT_MCP_SRC=../artifact-mcp build/emulator/server.sh up
+build/emulator/test-viewer.sh                    # evidence in /tmp/emulator-test/
+build/emulator/server.sh down && build/emulator/run.sh down
+```
+
+- **Emulator.** `run.sh` builds `build/emulator/Dockerfile` on top of the build image and keeps the
+  emulator, platform-tools and the `android-37.0` `google_apis` x86_64 system image in the named
+  volume `artifact-mcp-android-emulator-sdk`. The AVD is Pixel 7 sized (1080 x 2400, 420 dpi). It
+  runs with `-no-window -no-audio -gpu swiftshader_indirect -no-snapshot -no-boot-anim`, a
+  hole-punch cutout overlay and three-button navigation, so the insets are realistic. The container
+  uses `--network host`; adb and the emulator console listen on loopback only.
+- **Server and sign-in.** Cloudflare Access email login cannot run in the emulator. `server.sh`
+  starts the server from `ARTIFACT_MCP_SRC` with `TRUST_ACCESS_HEADERS=1` on `127.0.0.1:3480`, and
+  `identity-proxy.mjs` on `127.0.0.1:8480` sets `Cf-Access-Authenticated-User-Email:
+  tester@emulator.test` on every request. It publishes `geo-probe.html` (prints the shell's
+  `geo:*` and `native:*` replies) and the road-trip planner (`PLANNER_HTML`, without data bindings).
+  The data directory is a tmpfs; the publish key is random per run.
+- **Origin.** The emulator reaches the proxy as `http://localhost:8480` through `adb reverse`.
+  Only a **debug** build accepts an `http://localhost:<port>` or `http://127.0.0.1:<port>` origin
+  (`OriginPolicy.normalize(..., allowLoopbackHttp = BuildConfig.DEBUG)` and a cleartext exception
+  in `src/debug/res/xml/network_security_config.xml`). Release builds accept https only.
+- **Test.** `test-viewer.sh` installs the APK fresh, enters the origin on the setup screen and
+  drives the app with `adb input`, UI Automator dumps and the WebView DevTools protocol
+  (`cdp.mjs`; debug builds enable WebView debugging). It checks the WebView bounds against the
+  status bar, cutout, navigation bar and keyboard frames from `dumpsys window`, the bar colours
+  and icon contrast in light and dark mode, the shell consent sheet, the Android location prompt
+  (deny, then allow), `pm grant`, the probe position against `adb emu geo fix`, the planner's
+  "Center on me" and chat input, and `native:ready`. Without data bindings the planner hides its
+  map and chat, so the test posts the shell's `data:ready` message for a bound concierge to the
+  planner first. Each assertion prints PASS or FAIL; screenshots, UI dumps, logcat and
+  `results.txt` go to `/tmp/emulator-test/`.
 
 ## Limitations
 
-- No emulator or device testing was possible during development.
+- No device test yet of the foreground services, background playback with the screen off, or
+  Android Auto. The emulator test covers the viewer only.
 - Phase 2 car surfaces (Car App Library templates) are not built.
 - Google sign-in through Cloudflare Access cannot work in the WebView. Use the email one-time PIN.
   Alternatives for later: an Access service token or a dedicated Access application for the app.

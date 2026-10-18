@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Geo probe</title>
+<style>
+  body { font: 18px/1.4 system-ui, sans-serif; margin: 0; padding: 12px; background: #fff7d6; color: #111; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  button { font: inherit; padding: 14px 18px; margin: 4px 0; width: 100%; }
+  #status { font-size: 20px; font-weight: 700; padding: 8px; background: #fff; border: 2px solid #111; }
+  #native, #geo { overflow-wrap: anywhere; }
+  #log { font: 13px/1.35 monospace; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<!-- First line on purpose: the top of the artifact frame, to compare with the status bar. -->
+<h1 id="top">GEO PROBE TOP</h1>
+<div id="native">native: waiting</div>
+<div id="geo">geo: waiting</div>
+<button id="locate" type="button">Request location</button>
+<div id="status">status: idle</div>
+<div id="log"></div>
+<script>
+  // Talks to the viewer shell only (postMessage to the parent). Prints every reply on screen and in
+  // the console, so the emulator test can read it from a UI dump or logcat.
+  var seq = 0;
+  function log(line) {
+    console.log('[probe] ' + line);
+    var el = document.getElementById('log');
+    el.textContent = line + '\n' + el.textContent;
+  }
+  function send(msg) { log('-> ' + JSON.stringify(msg)); parent.postMessage(msg, '*'); }
+  window.addEventListener('message', function (event) {
+    var m = event.data;
+    if (!m || typeof m !== 'object' || typeof m.type !== 'string') return;
+    if (!/^(geo|native|audio):/.test(m.type)) return;
+    log('<- ' + JSON.stringify(m));
+    if (m.type === 'native:ready') {
+      document.getElementById('native').textContent =
+        'native: available=' + m.available + ' capabilities=' + (m.capabilities || []).join(',');
+    } else if (m.type === 'geo:ready') {
+      document.getElementById('geo').textContent = 'geo: supported=' + m.supported + ' remembered=' + m.remembered;
+    } else if (m.type === 'geo:position') {
+      document.getElementById('status').textContent =
+        'POSITION lat=' + m.lat.toFixed(4) + ' lon=' + m.lon.toFixed(4);
+    } else if (m.type === 'geo:error') {
+      document.getElementById('status').textContent = 'ERROR ' + m.reason;
+    }
+  });
+  document.getElementById('locate').addEventListener('click', function () {
+    seq += 1;
+    document.getElementById('status').textContent = 'status: requesting ' + seq;
+    send({ type: 'geo:request', requestId: 'probe-' + seq, highAccuracy: true });
+  });
+  send({ type: 'geo:hello' });
+  send({ type: 'native:hello' });
+</script>
+</body>
+</html>
