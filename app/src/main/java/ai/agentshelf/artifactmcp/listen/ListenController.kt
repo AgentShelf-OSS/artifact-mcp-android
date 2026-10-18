@@ -65,6 +65,12 @@ class ListenController(
 
     var viewer: ListenViewer? = null
 
+    /**
+     * Called with the owning page's host just before a command is sent to it, so a viewer
+     * paused in the background can resume and answer (set by the viewer activity).
+     */
+    var onWake: ((Any) -> Unit)? = null
+
     var mirror: MirrorState? = null
         private set
 
@@ -244,6 +250,7 @@ class ListenController(
     private fun send(action: MediaAction): Boolean {
         val current = mirror ?: return false
         val target = connection ?: return false
+        ownerHost?.let { host -> onWake?.invoke(host) }
         return try {
             target.post(Protocol.mediaCommand(current.artifactId, action))
             true

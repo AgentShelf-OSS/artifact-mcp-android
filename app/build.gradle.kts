@@ -21,6 +21,8 @@ android {
         targetSdk = 37
         versionCode = 2
         versionName = "0.1.1"
+        // Emulator-only media browser test (build/emulator/test-listen.sh); not run in CI.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -94,4 +96,8 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.truth)
 }

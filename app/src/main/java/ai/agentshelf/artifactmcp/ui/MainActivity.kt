@@ -23,6 +23,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.os.Message
 import android.view.Menu
 import android.view.MenuItem
@@ -64,6 +65,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 class MainActivity : AppCompatActivity(), ConsentGate, ListenViewer {
     companion object {
         const val BRIDGE_OBJECT = "ArtifactNative"
+        private const val TAG = "ArtifactViewer"
     }
 
     private lateinit var app: ArtifactApp
@@ -129,6 +131,7 @@ class MainActivity : AppCompatActivity(), ConsentGate, ListenViewer {
         createWebView()
         app.hub.consent = this
         app.listen.addListener(onListenChanged)
+        app.listen.onWake = { host -> if (host === webView && !started) wakeForCommand() }
         onBackPressedDispatcher.addCallback(this) {
             val view = webView
             if (view != null && view.canGoBack()) {
@@ -278,6 +281,13 @@ class MainActivity : AppCompatActivity(), ConsentGate, ListenViewer {
         }
     }
 
+    /** A car or notification control is about to reach the page: let it run, then re-check. */
+    private fun wakeForCommand() {
+        main.removeCallbacks(applyPause)
+        resumeWebView()
+        scheduleBackgroundPause()
+    }
+
     private fun scheduleBackgroundPause() {
         main.removeCallbacks(applyPause)
         main.postDelayed(applyPause, WebViewPausePolicy.GRACE_MS)
@@ -290,12 +300,14 @@ class MainActivity : AppCompatActivity(), ConsentGate, ListenViewer {
         if (!viewPaused && WebViewPausePolicy.pauseView(started, app.listen.isPlayingOn(view), locationInUse)) {
             view.onPause()
             viewPaused = true
+            Log.i(TAG, "viewer WebView paused in the background")
         }
         if (!timersPaused &&
             WebViewPausePolicy.pauseTimers(started, app.listen.isPlaying, app.listen.reader != null, locationInUse)
         ) {
             view.pauseTimers()
             timersPaused = true
+            Log.i(TAG, "WebView timers paused")
         }
     }
 
@@ -304,6 +316,7 @@ class MainActivity : AppCompatActivity(), ConsentGate, ListenViewer {
         if (viewPaused) {
             view.onResume()
             viewPaused = false
+            Log.i(TAG, "viewer WebView resumed")
         }
         if (timersPaused) {
             view.resumeTimers()
@@ -315,6 +328,7 @@ class MainActivity : AppCompatActivity(), ConsentGate, ListenViewer {
         main.removeCallbacks(applyPause)
         if (::app.isInitialized) {
             app.listen.removeListener(onListenChanged)
+            app.listen.onWake = null
             if (app.listen.viewer === this) app.listen.viewer = null
             webView?.let { app.listen.onHostGone(it) }
             if (timersPaused) webView?.resumeTimers()
