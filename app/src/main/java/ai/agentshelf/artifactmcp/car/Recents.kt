@@ -14,9 +14,9 @@ import kotlinx.serialization.json.put
 /**
  * An artifact listened to recently, for the car's Continue tab.
  *
- * [fraction] is the played share (0..1) when it is known. `media.session` does not say how far
- * into an artifact Listen is (no section index or count), so today it stays null and the car
- * shows the item as partly played.
+ * [fraction] is the played share (0..1) when it is known: pages with `media.progress` (ADR-0022)
+ * report a chapter index (with the chapter list) or a position and duration. Without them it
+ * stays null and the car shows the item as partly played.
  */
 data class RecentItem(
     val origin: String,
@@ -38,6 +38,9 @@ class RecentStore(private val kv: KeyValueStore) {
 
         /** Do not rewrite an unchanged entry more often than this. */
         const val MIN_TOUCH_MS = 60_000L
+
+        /** Share at which the car shows an item as fully played. */
+        const val FULL = 0.995
     }
 
     private val listeners = mutableListOf<() -> Unit>()
@@ -75,17 +78,37 @@ class RecentStore(private val kv: KeyValueStore) {
     fun forOrigin(origin: String?): List<RecentItem> = if (origin == null) emptyList() else all().filter { it.origin == origin }
 
     /**
-     * Record that [item] is playing: it moves to the front. An unchanged entry touched within
-     * [MIN_TOUCH_MS] is not rewritten (`media.session` arrives on every section change).
+     * Record that [item] is playing: it moves to the front. An entry already in front that was
+     * touched within [MIN_TOUCH_MS] is not rewritten when only its time or a small part of its
+     * played share changed (`media.session` arrives on every section change and every 5 s).
      */
     fun record(item: RecentItem) {
         val current = all()
         val existing = current.firstOrNull { it.origin == item.origin && it.artifactId == item.artifactId }
         val merged = item.copy(fraction = item.fraction ?: existing?.fraction)
-        if (existing != null && current.first() == existing && existing.copy(at = merged.at) == merged && merged.at - existing.at < MIN_TOUCH_MS) return
+        if (existing != null && current.first() == existing && merged.at - existing.at < MIN_TOUCH_MS &&
+            existing.copy(at = merged.at, fraction = merged.fraction) == merged && !fractionChanged(existing.fraction, merged.fraction)
+        ) return
         val next = (listOf(merged) + current.filterNot { it.origin == item.origin && it.artifactId == item.artifactId }).take(MAX)
         save(next)
         listeners.toList().forEach { it() }
+    }
+
+    /** Update the played share of an existing entry without moving it (Listen paused). */
+    fun updateFraction(origin: String, artifactId: String, fraction: Double) {
+        val current = all()
+        val index = current.indexOfFirst { it.origin == origin && it.artifactId == artifactId }
+        if (index < 0) return
+        val value = fraction.coerceIn(0.0, 1.0)
+        if (current[index].fraction == value) return
+        save(current.toMutableList().also { it[index] = it[index].copy(fraction = value) })
+        listeners.toList().forEach { it() }
+    }
+
+    /** A change worth a rewrite: from or to unknown, by a whole percent, or to fully played. */
+    private fun fractionChanged(old: Double?, new: Double?): Boolean {
+        if (old == null || new == null) return old != new
+        return kotlin.math.abs(old - new) >= 0.01 || ((old >= FULL) != (new >= FULL))
     }
 
     fun clear() {

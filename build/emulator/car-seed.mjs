@@ -36,6 +36,30 @@ const stories = [
   ["bookclub", "car/winter-picks", "Book club picks for winter", "Lists", ["Something long", "Something short", "Something funny"]],
 ];
 
+// "Rack dashboard tour" is an e-reader page with chapters (ADR-0022), for the car's chapter queue.
+const EREADER = new Set(["car/rack-tour"]);
+function ereader(title, sections) {
+  // Long enough (about 40 s of fake speech per chapter) for the now-playing, queue and button checks.
+  const chapters = sections.map((name, i) => ({ part: "Rack tour", title: name, blocks: [
+    { t: "p", s: `This is part ${i + 1} of ${title}. It is a passage for the car test, read by the speech worker, long enough to keep Listen busy for a while.` },
+    { t: "p", s: "The road is quiet and the story goes on, one chapter after another, while the dashboard counts the miles and the fans keep turning." },
+    { t: "p", s: "Every light on the panel has a meaning. Green is fine, amber is a question, and red is a story for another day and another chapter." },
+    { t: "p", s: "At the end of the row the cables are labelled by hand, and the labels are older than most of the machines that they describe so carefully." }] }));
+  const toc = chapters.map((c, i) => `<a href="#" data-go="${i}">${c.part} · ${c.title}</a>`).join("");
+  const script = `var BOOK=JSON.parse(document.getElementById("book").textContent).chapters;
+function show(i){var c=BOOK[i],h='<article id="article"><header class="ch-head"><div class="part">'+c.part+'</div><h1>'+c.title+'</h1></header>';
+c.blocks.forEach(function(b,k){h+='<p data-p="'+k+'">'+b.s+'</p>';});
+if(i+1<BOOK.length)h+='<nav class="ch-nav"><a href="#" class="next" data-go="'+(i+1)+'">Next</a></nav>';
+document.getElementById("host").innerHTML=h+'</article>';}
+document.addEventListener("click",function(e){var g=e.target.closest("[data-go]");if(!g)return;e.preventDefault();show(Number(g.getAttribute("data-go")));});
+document.getElementById("t-contents").addEventListener("click",function(){document.querySelector(".toc").hidden=false;});
+show(0);`;
+  return `<!doctype html>\n<html lang="en">\n<head><meta charset="utf-8"><title>${title}</title></head>\n<body>\n` +
+    `<script id="book" type="application/json">${JSON.stringify({ chapters })}</script>\n` +
+    `<button id="t-contents" data-panel="contents">Contents</button><nav class="toc" hidden>${toc}</nav><div id="host"></div>\n` +
+    `<script>${script}</script>\n</body>\n</html>\n`;
+}
+
 function html(title, sections) {
   const body = sections.map((name, i) =>
     `<h2>${name}</h2>\n<p>This is part ${i + 1} of ${title}. It is a short passage for the car test, read by the speech worker.</p>\n<p>The road is quiet and the story goes on.</p>`).join("\n");
@@ -49,7 +73,7 @@ for (const [org, artifactKey, title, category, sections] of stories) {
     headers: { authorization: `Bearer ${keys[org]}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({
       jsonrpc: "2.0", id: ++rpcId, method: "tools/call",
-      params: { name: "publish_artifact", arguments: { html: html(title, sections), title, description: "Car test story", artifact_key: artifactKey, category } },
+      params: { name: "publish_artifact", arguments: { html: EREADER.has(artifactKey) ? ereader(title, sections) : html(title, sections), title, description: "Car test story", artifact_key: artifactKey, category } },
     }),
   });
   const body = await response.json();

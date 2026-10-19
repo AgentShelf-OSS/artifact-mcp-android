@@ -15,7 +15,9 @@ import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.webkit.WebMessageCompat
@@ -42,6 +44,9 @@ class ReaderWebView(
     interface Events {
         /** A navigation left the allowed URLs; [signIn] when it went to the Access login. */
         fun onReaderBlocked(reader: ReaderWebView, signIn: Boolean)
+
+        /** The page itself did not load (network or HTTP error of the main frame). */
+        fun onReaderFailed(reader: ReaderWebView, failure: MirrorState.Failure)
         fun onReaderGone(reader: ReaderWebView)
     }
 
@@ -125,6 +130,17 @@ class ReaderWebView(
             }
         }
 
+        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+            // Sub-resources may fail without stopping Listen; only the page itself matters.
+            if (destroyed || !request.isForMainFrame || !allowed(request.url.toString())) return
+            events.onReaderFailed(this@ReaderWebView, ReaderFailures.forNetworkError(error.errorCode))
+        }
+
+        override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+            if (destroyed || !request.isForMainFrame || !allowed(request.url.toString())) return
+            ReaderFailures.forHttpStatus(errorResponse.statusCode)?.let { events.onReaderFailed(this@ReaderWebView, it) }
+        }
+
         override fun onPageFinished(view: WebView, url: String) {
             if (OriginPolicy.isSameOrigin(url, origin)) CookieManager.getInstance().flush()
         }
@@ -154,5 +170,26 @@ class ReaderWebView(
         override fun onPermissionRequest(request: PermissionRequest) {
             request.deny()
         }
+    }
+}
+
+/** What a failed load of the reader page means for the car (pure, for tests). */
+object ReaderFailures {
+    /** A `WebViewClient.ERROR_*` code of the main frame. */
+    fun forNetworkError(code: Int): MirrorState.Failure = when (code) {
+        WebViewClient.ERROR_HOST_LOOKUP, WebViewClient.ERROR_CONNECT, WebViewClient.ERROR_TIMEOUT,
+        WebViewClient.ERROR_IO, WebViewClient.ERROR_PROXY_AUTHENTICATION, WebViewClient.ERROR_UNKNOWN,
+        -> MirrorState.Failure.OFFLINE
+        WebViewClient.ERROR_AUTHENTICATION -> MirrorState.Failure.SIGN_IN
+        WebViewClient.ERROR_FILE_NOT_FOUND -> MirrorState.Failure.NOT_FOUND
+        else -> MirrorState.Failure.SERVER
+    }
+
+    /** An HTTP status of the main frame; null for a success or redirect status. */
+    fun forHttpStatus(status: Int): MirrorState.Failure? = when {
+        status < 400 -> null
+        status == 401 || status == 403 -> MirrorState.Failure.SIGN_IN
+        status == 404 || status == 410 -> MirrorState.Failure.NOT_FOUND
+        else -> MirrorState.Failure.SERVER
     }
 }

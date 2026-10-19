@@ -223,6 +223,31 @@ class LibraryTest {
         assertThat(items.none { it.subtitle?.contains("\u00B7") == true }).isTrue()
     }
 
+    @Test fun `offline marks continue and library rows and adds a notice`() {
+        val recents = listOf(RecentItem(origin, "frank", "Frankenstein reader", "bookclub", "Books", null, at = 2))
+        val items = LibraryTree.continueChildren(recents, strings, offline = true)
+        assertThat(items.map { it.id }).containsExactly("no-connection", "art:frank").inOrder()
+        assertThat(items[0].playable).isFalse()
+        assertThat(items[0].id).isIn(LibraryTree.MESSAGES)
+        assertThat(items[1].subtitle).isEqualTo(strings.needsConnection)
+        assertThat(LibraryTree.continueChildren(emptyList(), strings, offline = true).map { it.id }).containsExactly("continue-empty")
+        val org = LibraryTree.orgChildren(LibraryView.Ready(sample, true), "org:homelab", strings, offline = true)!!
+        assertThat(org.map { it.subtitle }.toSet()).containsExactly(strings.needsConnection)
+        assertThat(LibraryTree.orgChildren(LibraryView.Ready(sample, false), "org:homelab", strings)!!.map { it.subtitle }.toSet()).containsExactly(null)
+    }
+
+    @Test fun `the recent root lists only the newest playable item`() {
+        assertThat(LibraryTree.recentChildren(emptyList(), strings)).isEmpty()
+        val recents = listOf(
+            RecentItem(origin, "frank", "Frankenstein reader", "bookclub", "Books", null, at = 2, fraction = 0.25),
+            RecentItem(origin, "trip", "Road trip planner", "homelab", "", null, at = 1),
+        )
+        val items = LibraryTree.recentChildren(recents, strings)
+        assertThat(items.map { it.id }).containsExactly("art:frank")
+        assertThat(items.single().playable).isTrue()
+        assertThat(items.single().completion?.fraction).isEqualTo(0.25)
+    }
+
     @Test fun `long titles are shortened for the car at a word break`() {
         assertThat(LibraryTree.shortTitle("Road trip planner")).isEqualTo("Road trip planner")
         val long = LibraryTree.shortTitle("The complete annotated guide to the Luxor to Aswan road trip")

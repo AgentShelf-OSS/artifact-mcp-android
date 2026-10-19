@@ -55,6 +55,7 @@ class CarCommandsTest {
 }
 
 class RecentStoreTest {
+    private val labels = CarCommands.Labels("Back 15 s", "Speed %1\$s")
     private val origin = "https://artifact.example.com"
     private fun item(id: String, at: Long, title: String = "T $id") = RecentItem(origin, id, title, "homelab", "Family", null, at)
 
@@ -97,5 +98,59 @@ class RecentStoreTest {
         assertThat(store.all().map { it.artifactId to it.fraction }).containsExactly("ok" to 1.0)
         kv.put("car_recent", "not json")
         assertThat(store.all()).isEmpty()
+    }
+
+    @Test fun `forward is a third button and speed moves to the overflow`() {
+        assertThat(CarCommands.action(CarCommands.FORWARD)).isEqualTo(MediaAction.FORWARD)
+        val all = CarCommands.buttons(true, true, "1", labels, forward = true)
+        assertThat(all.map { it.command }).containsExactly(CarCommands.REWIND, CarCommands.FORWARD, CarCommands.SPEED).inOrder()
+        assertThat(all.size).isAtMost(CarCommands.MAX_BUTTONS)
+        assertThat(all[1].icon).isEqualTo(CommandButton.ICON_SKIP_FORWARD_30)
+        assertThat(all[1].displayName).isEqualTo("Forward 30 s")
+        assertThat(all[1].slots.first()).isEqualTo(CommandButton.SLOT_FORWARD_SECONDARY)
+        assertThat(all[2].slots).containsExactly(CommandButton.SLOT_OVERFLOW)
+        // Without forward, speed keeps the secondary slot.
+        assertThat(CarCommands.buttons(true, true, "1", labels).last().slots.first()).isEqualTo(CommandButton.SLOT_FORWARD_SECONDARY)
+    }
+
+    @Test fun `forward target is 30 s on, within the duration when known`() {
+        assertThat(CarCommands.forwardTarget(10_000, 100_000)).isEqualTo(40_000)
+        assertThat(CarCommands.forwardTarget(90_000, 100_000)).isEqualTo(100_000)
+        assertThat(CarCommands.forwardTarget(90_000, androidx.media3.common.C.TIME_UNSET)).isEqualTo(120_000)
+    }
+
+    @Test fun `played share is stored, small changes are throttled, pause updates it in place`() {
+        val store = RecentStore(InMemoryKeyValueStore())
+        var heard = 0
+        store.addListener { heard++ }
+        store.record(item("a", 1_000).copy(fraction = 0.10))
+        store.record(item("a", 2_000).copy(fraction = 0.104))
+        assertThat(store.all().single().fraction).isEqualTo(0.10)
+        store.record(item("a", 3_000).copy(fraction = 0.2))
+        assertThat(store.all().single().fraction).isEqualTo(0.2)
+        assertThat(heard).isEqualTo(2)
+        store.record(item("b", 4_000))
+        store.updateFraction(origin, "a", 0.5)
+        assertThat(store.all().map { it.artifactId to it.fraction }).containsExactly("b" to null, "a" to 0.5).inOrder()
+        store.updateFraction(origin, "missing", 0.5)
+        assertThat(store.all()).hasSize(2)
+        store.updateFraction(origin, "a", 3.0)
+        assertThat(store.all().last().fraction).isEqualTo(1.0)
+    }
+
+    @Test fun `car errors explain why resumption or search cannot play`() {
+        val ready = ai.agentshelf.artifactmcp.library.LibraryView.Ready(ai.agentshelf.artifactmcp.library.Library(emptyList()), false)
+        assertThat(CarErrors.resumption(false, true, ready, true, true)).isEqualTo(CarErrors.Kind.NOT_SET_UP)
+        assertThat(CarErrors.resumption(true, false, ready, true, true)).isEqualTo(CarErrors.Kind.NOTHING_TO_RESUME)
+        assertThat(CarErrors.resumption(true, true, ai.agentshelf.artifactmcp.library.LibraryView.SignedOut, true, true)).isEqualTo(CarErrors.Kind.SIGNED_OUT)
+        assertThat(CarErrors.resumption(true, true, ready, false, true)).isEqualTo(CarErrors.Kind.OFFLINE)
+        assertThat(CarErrors.resumption(true, true, ready, true, true)).isNull()
+        // Metadata only (the resume card after a reboot) works offline and signed out.
+        assertThat(CarErrors.resumption(true, true, ai.agentshelf.artifactmcp.library.LibraryView.SignedOut, false, false)).isNull()
+        assertThat(CarErrors.searchMiss(ready, true)).isEqualTo(CarErrors.Kind.NO_MATCH)
+        assertThat(CarErrors.searchMiss(ai.agentshelf.artifactmcp.library.LibraryView.SignedOut, true)).isEqualTo(CarErrors.Kind.SIGNED_OUT)
+        assertThat(CarErrors.searchMiss(ai.agentshelf.artifactmcp.library.LibraryView.Unavailable, false)).isEqualTo(CarErrors.Kind.OFFLINE)
+        assertThat(CarErrors.searchMiss(ai.agentshelf.artifactmcp.library.LibraryView.Unavailable, true)).isEqualTo(CarErrors.Kind.LIBRARY_UNAVAILABLE)
+        assertThat(CarErrors.Kind.SIGNED_OUT.sessionCode).isEqualTo(androidx.media3.session.SessionError.ERROR_SESSION_AUTHENTICATION_EXPIRED)
     }
 }

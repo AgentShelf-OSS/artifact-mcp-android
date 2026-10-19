@@ -339,6 +339,28 @@ class BridgeHubTest {
         assertThat(shell.sent).isEmpty()
     }
 
+    @Test fun `media chapters reach the sink from the viewer and the reader, only for their artifact`() {
+        val chapters = mutableListOf<Protocol.Inbound.MediaChapters>()
+        val withMedia = BridgeHub("0.1.0", { now }, { origin }, grants, played, notices, location, audio, notifier, object : MediaSessionSink {
+            override fun onMediaSession(message: Protocol.Inbound.MediaSession, connection: ShellConnection) = Unit
+            override fun onMediaChapters(message: Protocol.Inbound.MediaChapters, connection: ShellConnection) {
+                chapters += message
+            }
+        })
+        val list = """{"v":1,"type":"media.chapters","artifactId":"book","chapters":["One","Two"]}"""
+        val viewer = Shell("book")
+        withMedia.onShellMessage(list, viewer)
+        val reader = Shell("book")
+        withMedia.onShellMessage(list, reader, reader = true)
+        assertThat(chapters.map { it.chapters }).containsExactly(listOf("One", "Two"), listOf("One", "Two"))
+        assertThat(viewer.sent + reader.sent).isEmpty()
+        val other = Shell("other")
+        withMedia.onShellMessage(list, other)
+        withMedia.onShellMessage(list, other, reader = true)
+        assertThat(chapters).hasSize(2)
+        assertThat(other.sent.map { it.str("reason") }).containsExactly("denied", "denied")
+    }
+
     @Test fun `media session for another artifact is denied`() {
         val sessions = mutableListOf<Pair<Protocol.Inbound.MediaSession, ShellConnection>>()
         val withMedia = mediaHub(sessions)

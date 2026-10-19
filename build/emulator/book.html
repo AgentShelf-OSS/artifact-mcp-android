@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Chapter book</title></head>
+<body>
+<!-- A minimal e-reader page (ADR-0022 chapters): the reader bridge reads #book, the TOC links
+     ([data-go]) and the rendered #article. Used by test-listen.sh for the chapter queue. -->
+<script id="book" type="application/json">{"chapters": [{"part": "Part one", "title": "The harbour", "blocks": [{"t": "p", "s": "The boats came in before the storm. Every rope was checked twice, and the lamps along the quay were lit early in the afternoon."}, {"t": "p", "s": "Children ran between the nets while the old pilot counted hulls against the grey water and wrote the names in his book."}, {"t": "p", "s": "Nobody spoke much. The wind had already turned, and everyone on the quay knew what that meant for the night ahead."}]}, {"part": "Part one", "title": "The storm", "blocks": [{"t": "p", "s": "The rain arrived first, then the wind, then a sound like a train passing just beyond the breakwater all night long."}, {"t": "p", "s": "Shutters banged along the street. In the inn the fire was kept high and the door was opened only for the harbour master."}, {"t": "p", "s": "Near midnight a light was seen far out in the bay, rising and falling with the swell, and then it was gone again."}]}, {"part": "Part two", "title": "The lighthouse", "blocks": [{"t": "p", "s": "At the end of the breakwater the keeper climbed the stairs. The lens turned, slow and patient, and the beam went out across the bay."}, {"t": "p", "s": "He counted the seconds between flashes, as he had every night for twenty years, and wrote the time beside the weather."}, {"t": "p", "s": "Far off, a single sail turned toward the light, and the keeper put down his pen and watched it come in."}]}, {"part": "Part two", "title": "The morning", "blocks": [{"t": "p", "s": "By dawn the wind had dropped. The harbour was quiet, and the gulls were back on the posts, arguing about the night."}, {"t": "p", "s": "The small boat lay against the slipway with its sail torn and its crew asleep in the boathouse under borrowed blankets."}, {"t": "p", "s": "The pilot opened his book and added one more name to the list, then went home to sleep until the afternoon."}]}]}</script>
+<button id="t-contents" data-panel="contents">Contents</button>
+<nav class="toc" hidden><a href="#" data-go="0">Part one · The harbour</a><a href="#" data-go="1">Part one · The storm</a><a href="#" data-go="2">Part two · The lighthouse</a><a href="#" data-go="3">Part two · The morning</a></nav>
+<div id="host"></div>
+<script>
+var BOOK = JSON.parse(document.getElementById("book").textContent).chapters;
+function show(i) {
+  var c = BOOK[i];
+  var html = '<article id="article"><header class="ch-head"><div class="part">' + c.part + '</div><h1>' + c.title + '</h1></header>';
+  c.blocks.forEach(function (b, k) { html += '<p data-p="' + k + '">' + b.s + '</p>'; });
+  if (i + 1 < BOOK.length) html += '<nav class="ch-nav"><a href="#" class="next" data-go="' + (i + 1) + '">Next</a></nav>';
+  document.getElementById("host").innerHTML = html + '</article>';
+}
+document.addEventListener("click", function (e) {
+  var go = e.target.closest("[data-go]");
+  if (!go) return;
+  e.preventDefault();
+  show(Number(go.getAttribute("data-go")));
+});
+document.getElementById("t-contents").addEventListener("click", function () { document.querySelector(".toc").hidden = false; });
+show(0);
+</script>
+</body>
+</html>

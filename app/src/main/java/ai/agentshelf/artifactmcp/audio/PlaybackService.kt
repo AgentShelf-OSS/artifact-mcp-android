@@ -5,6 +5,7 @@ import ai.agentshelf.artifactmcp.R
 import ai.agentshelf.artifactmcp.bridge.Protocol
 import ai.agentshelf.artifactmcp.bridge.Protocol.MediaAction
 import ai.agentshelf.artifactmcp.car.CarCommands
+import ai.agentshelf.artifactmcp.car.CarErrors
 import ai.agentshelf.artifactmcp.car.CoverUris
 import ai.agentshelf.artifactmcp.library.Artwork
 import ai.agentshelf.artifactmcp.library.BrowseNode
@@ -25,8 +26,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
@@ -115,6 +118,7 @@ class PlaybackService : MediaLibraryService() {
     private var buttons: List<CarCommands.Button> = emptyList()
 
     private val onActive: (PlaybackArbiter.Source) -> Unit = { source ->
+        clearRejection()
         applyPlayer(source)
         updateButtons()
     }
@@ -134,6 +138,10 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) = updateButtons()
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (isPlaying) clearRejection()
+        }
     }
 
     @OptIn(UnstableApi::class) // DefaultMediaNotificationProvider customization
@@ -186,23 +194,27 @@ class PlaybackService : MediaLibraryService() {
 
     // ---- custom now-playing buttons ------------------------------------------------------------
 
-    private fun labels() = CarCommands.Labels(getString(R.string.car_rewind), getString(R.string.car_speed))
+    private fun labels() = CarCommands.Labels(getString(R.string.car_rewind), getString(R.string.car_speed), getString(R.string.car_forward))
 
     /** Buttons for the active source: the Listen page's actions, or the native queue. */
     private fun currentButtons(): List<CarCommands.Button> {
         if (app.arbiter.active == PlaybackArbiter.Source.MIRROR) {
             val mirror = app.listen.mirror
-            val live = mirror != null && (mirror.phase == MirrorState.Phase.PLAYING || mirror.phase == MirrorState.Phase.PAUSED)
+            val live = mirror != null && (
+                mirror.phase == MirrorState.Phase.PLAYING || mirror.phase == MirrorState.Phase.PAUSED ||
+                    mirror.phase == MirrorState.Phase.BUFFERING
+                )
             return CarCommands.buttons(
                 rewind = live && mirror!!.supports(MediaAction.REWIND),
                 speed = live && mirror!!.supports(MediaAction.SPEED),
                 rate = mirror?.rate,
                 labels = labels(),
+                forward = live && mirror!!.supports(MediaAction.FORWARD),
             )
         }
         val player = app.audio.player
         val hasItem = player.mediaItemCount > 0
-        return CarCommands.buttons(hasItem, hasItem, CarCommands.rateString(player.playbackParameters.speed), labels())
+        return CarCommands.buttons(hasItem, hasItem, CarCommands.rateString(player.playbackParameters.speed), labels(), forward = hasItem)
     }
 
     // CommandButton slots and custom icons; the slots come from CommandButton.SLOT_* constants
@@ -234,6 +246,7 @@ class PlaybackService : MediaLibraryService() {
         val player = app.audio.player
         when (action) {
             MediaAction.REWIND -> player.seekTo(CarCommands.rewindTarget(player.currentPosition))
+            MediaAction.FORWARD -> player.seekTo(CarCommands.forwardTarget(player.currentPosition, player.duration))
             MediaAction.SPEED -> player.setPlaybackSpeed(CarCommands.nextNativeRate(player.playbackParameters.speed))
             else -> Unit
         }
@@ -251,6 +264,8 @@ class PlaybackService : MediaLibraryService() {
         offline = getString(R.string.car_offline),
         empty = getString(R.string.car_empty),
         other = getString(R.string.car_other),
+        needsConnection = getString(R.string.car_needs_connection),
+        noConnection = getString(R.string.car_no_connection),
     )
 
     private fun iconRes(name: String): Int = when (name) {
@@ -367,14 +382,48 @@ class PlaybackService : MediaLibraryService() {
 
     private fun children(parentId: String, view: LibraryView): List<MediaItem>? {
         val map = ::node
+        val offline = !app.isOnline()
         return when (parentId) {
             BrowseTree.ROOT -> LibraryTree.root(strings(), hasRoadStories(), rootLimit).map(map)
-            LibraryTree.CONTINUE -> LibraryTree.continueChildren(recents(), strings()).map(map)
+            LibraryTree.CONTINUE -> LibraryTree.continueChildren(recents(), strings(), offline).map(map)
             LibraryTree.LIBRARY -> LibraryTree.libraryChildren(view, strings()).map(map)
             LibraryTree.ROAD -> roadItems()
+            LibraryTree.RECENT -> LibraryTree.recentChildren(recents(), strings()).map(map)
             in LibraryTree.MESSAGES -> emptyList()
-            else -> LibraryTree.orgChildren(view, parentId, strings())?.map(map)
+            else -> LibraryTree.orgChildren(view, parentId, strings(), offline)?.map(map)
         }
+    }
+
+    private fun errorMessage(kind: CarErrors.Kind, query: String = ""): String = when (kind) {
+        CarErrors.Kind.NOT_SET_UP -> getString(R.string.car_set_up_first)
+        CarErrors.Kind.SIGNED_OUT -> getString(R.string.car_signed_out)
+        CarErrors.Kind.NOTHING_TO_RESUME -> getString(R.string.car_nothing_to_resume)
+        CarErrors.Kind.OFFLINE -> getString(R.string.car_no_connection)
+        CarErrors.Kind.NO_MATCH -> getString(R.string.car_no_match, query.take(60))
+        CarErrors.Kind.LIBRARY_UNAVAILABLE -> getString(R.string.car_library_unavailable)
+    }
+
+    /**
+     * Tell the car why nothing starts: the session shows [kind] as a playback error (signed out
+     * with the "open on phone" resolution) until something plays, and the request fails.
+     */
+    private fun <T> reject(kind: CarErrors.Kind, query: String = ""): ListenableFuture<T> {
+        val message = errorMessage(kind, query)
+        val extras = if (kind == CarErrors.Kind.SIGNED_OUT) app.signInResolutionExtras() else Bundle.EMPTY
+        Log.i(TAG, "rejected: $kind")
+        rejected = true
+        session?.setPlaybackException(PlaybackException(message, null, kind.playbackCode, extras))
+        return Futures.immediateFailedFuture(IllegalStateException(message))
+    }
+
+    /** Whether the session shows a [reject] error. */
+    private var rejected = false
+
+    /** Something starts: drop the [reject] error. */
+    private fun clearRejection() {
+        if (!rejected) return
+        rejected = false
+        session?.setPlaybackException(null)
     }
 
     /** Media item of a library artifact (title from the library when known). */
@@ -408,6 +457,7 @@ class PlaybackService : MediaLibraryService() {
         val title = (app.library.known() as? LibraryView.Ready)?.library?.find(artifactId)?.title
             ?: item.mediaMetadata.title?.toString().orEmpty()
         if (!app.listen.playFromLibrary(artifactId, title)) return null
+        clearRejection()
         applyPlayer(app.arbiter.active)
         val result = SettableFuture.create<MediaItem>()
         main.post { result.set(item) }
@@ -452,6 +502,7 @@ class PlaybackService : MediaLibraryService() {
             val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(CarCommands.REWIND, Bundle.EMPTY))
                 .add(SessionCommand(CarCommands.SPEED, Bundle.EMPTY))
+                .add(SessionCommand(CarCommands.FORWARD, Bundle.EMPTY))
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailableSessionCommands(commands)
@@ -476,6 +527,16 @@ class PlaybackService : MediaLibraryService() {
             browser: MediaSession.ControllerInfo,
             params: LibraryParams?,
         ): ListenableFuture<LibraryResult<MediaItem>> {
+            if (params?.isRecent == true) {
+                // EXTRA_RECENT (Android Auto's resume card): a root whose one child is the newest
+                // Continue item. No recent item: no root (a null root for legacy browsers).
+                if (recents().isEmpty()) return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_NOT_SUPPORTED))
+                val recentRoot = MediaItem.Builder()
+                    .setMediaId(LibraryTree.RECENT)
+                    .setMediaMetadata(MediaMetadata.Builder().setIsBrowsable(true).setIsPlayable(false).setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED).build())
+                    .build()
+                return Futures.immediateFuture(LibraryResult.ofItem(recentRoot, LibraryParams.Builder().setRecent(true).build()))
+            }
             params?.extras?.let { extras ->
                 val limit = extras.getInt(MediaConstants.EXTRAS_KEY_ROOT_CHILDREN_LIMIT, 0)
                 rootLimit = if (limit > 0) limit else Int.MAX_VALUE
@@ -573,14 +634,25 @@ class PlaybackService : MediaLibraryService() {
          * Play the best match for [query]; the library is fetched first when none is known yet
          * (for example right after the app started).
          */
-        private fun <T> playSearch(query: String, wrap: (MediaItem) -> T): ListenableFuture<T> {
+        private fun <T> playSearch(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            query: String,
+            wrap: (MediaItem) -> T,
+        ): ListenableFuture<T> {
             val result = SettableFuture.create<T>()
             withLibrary { view ->
                 val pick = searchPick(query)
                 Log.i(TAG, "play from search: ${view::class.simpleName}, match ${pick != null}")
                 val started = pick?.let(::startLibraryItem)
                 if (started == null) {
-                    result.setException(UnsupportedOperationException("nothing matches"))
+                    // A clear reason for the car instead of a silent failure.
+                    val kind = if (pick == null && LibraryTree.searchTerms(query).isEmpty()) {
+                        CarErrors.Kind.NOTHING_TO_RESUME
+                    } else {
+                        CarErrors.searchMiss(view, app.isOnline())
+                    }
+                    result.setFuture(reject(kind, LibraryTree.searchTerms(query)))
                 } else {
                     result.setFuture(Futures.transform(started, { item -> wrap(item) }, Runnable::run))
                 }
@@ -603,7 +675,7 @@ class PlaybackService : MediaLibraryService() {
             val picked = mediaItems.getOrNull(startIndex.coerceAtLeast(0)) ?: mediaItems.firstOrNull()
                 ?: return Futures.immediateFailedFuture(UnsupportedOperationException())
             searchQuery(picked)?.let { query ->
-                return playSearch(query) { item -> MediaSession.MediaItemsWithStartPosition(listOf(item), 0, 0L) }
+                return playSearch(mediaSession, controller, query) { item -> MediaSession.MediaItemsWithStartPosition(listOf(item), 0, 0L) }
             }
             LibraryTree.parseArtifactMediaId(picked.mediaId)?.let { artifactId ->
                 val started = startLibraryItem(artifactId) ?: return Futures.immediateFailedFuture(UnsupportedOperationException())
@@ -644,13 +716,46 @@ class PlaybackService : MediaLibraryService() {
             return result
         }
 
+        /**
+         * Playback resumption (a media button or the system's resume card with nothing loaded):
+         * the newest Continue item. For playback it opens `<origin>/<id>?listen=autoplay` like a
+         * library pick; the page resumes its saved place itself. Not set up, signed out,
+         * offline or nothing to resume: a clear error for the controller, never a crash.
+         */
+        override fun onPlaybackResumption(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            isForPlayback: Boolean,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            val origin = app.originStore.origin
+            val newest = recents().firstOrNull()
+            val problem = CarErrors.resumption(
+                originSet = origin != null,
+                hasRecent = newest != null,
+                library = app.library.known(),
+                online = app.isOnline(),
+                forPlayback = isForPlayback,
+            )
+            Log.i(TAG, "playback resumption (forPlayback=$isForPlayback): ${problem ?: "newest recent"}")
+            if (problem != null) {
+                // Metadata only (the system's resume card): no error on screen.
+                return if (isForPlayback) reject(problem) else Futures.immediateFailedFuture(IllegalStateException(problem.name))
+            }
+            val artifactId = newest!!.artifactId
+            if (!isForPlayback) {
+                return Futures.immediateFuture(MediaSession.MediaItemsWithStartPosition(listOf(libraryItem(artifactId)), 0, C.TIME_UNSET))
+            }
+            val started = startLibraryItem(artifactId) ?: return reject(CarErrors.Kind.NOTHING_TO_RESUME)
+            return Futures.transform(started, { item -> MediaSession.MediaItemsWithStartPosition(listOf(item), 0, C.TIME_UNSET) }, Runnable::run)
+        }
+
         override fun onAddMediaItems(
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>,
         ): ListenableFuture<MutableList<MediaItem>> {
             // A library artifact cannot be queued behind something else: picking it opens Listen.
-            mediaItems.firstNotNullOfOrNull(::searchQuery)?.let { query -> return playSearch(query) { item -> mutableListOf(item) } }
+            mediaItems.firstNotNullOfOrNull(::searchQuery)?.let { query -> return playSearch(mediaSession, controller, query) { item -> mutableListOf(item) } }
             mediaItems.firstNotNullOfOrNull { LibraryTree.parseArtifactMediaId(it.mediaId) }?.let { artifactId ->
                 val started = startLibraryItem(artifactId) ?: return Futures.immediateFailedFuture(UnsupportedOperationException())
                 return Futures.transform(started, { item -> mutableListOf(item) }, Runnable::run)

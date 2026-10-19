@@ -147,6 +147,10 @@ case "$cmd" in
     build_images
     prepare_sdk
     docker rm -f "$NAME" > /dev/null 2>&1 || true
+    # `down` stops the emulator hard, which leaves its AVD lock files behind; the next boot then
+    # fails with "Running multiple emulators with the same AVD". This profile's container is gone,
+    # so its locks are stale (the other profile uses another AVD).
+    docker run --rm -v "$VOLUME":/emu-sdk "$EMU_IMAGE" bash -c "rm -f /emu-sdk/avd/$AVD.avd/*.lock"
     docker run -d --name "$NAME" --network host --device /dev/kvm \
       -e ANDROID_SDK_ROOT=/emu-sdk -e ANDROID_HOME=/emu-sdk -e ANDROID_SERIAL="emulator-${PORTS%%,*}" \
       -v "$VOLUME":/emu-sdk -v "$ROOT":/src \
