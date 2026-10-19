@@ -15,6 +15,10 @@
 # tone per request), so the viewer's Listen player and the Android media mirror can be tested.
 #
 # Writes the published artifact ids to /tmp/emulator-test/artifacts.env.
+#
+# CAR_SEED=1 also makes the test identity an administrator (so /api/library lists every
+# organization) and publishes car-seed.mjs: organizations "homelab" (gallery color #356B9F) and
+# "bookclub" (no color) with categorized stories, for the car design screenshots (test-car.sh).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -41,6 +45,14 @@ case "$cmd" in
     docker image inspect "$image" > /dev/null 2>&1 || docker build -q -t "$image" "$SRC" > /dev/null
     # A throwaway publish key for this run only; never printed.
     key=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    homelab_key=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    bookclub_key=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    api_keys="emu:$ORG:$key"
+    car_env=()
+    if [ "${CAR_SEED:-0}" = 1 ]; then
+      api_keys="$api_keys,emu-homelab:homelab:$homelab_key,emu-bookclub:bookclub:$bookclub_key"
+      car_env=(-e ADMIN_EMAILS=$EMAIL)
+    fi
     audit_key=$(head -c 32 /dev/urandom | base64)
     webhook_key=$(head -c 32 /dev/urandom | base64)
     docker rm -f "$SERVER" "$PROXY" "$TTS" > /dev/null 2>&1 || true
@@ -54,7 +66,7 @@ case "$cmd" in
       -e TTS_ENABLED=1 -e TTS_WORKER_URL=http://127.0.0.1:$TTS_PORT -e TTS_WORKER_TOKEN_FILE=/run/fake-tts.token \
       -e PORT=$SERVER_PORT -e LISTEN_HOST=127.0.0.1 -e TRUST_ACCESS_HEADERS=1 -e DATA_DIR=/data \
       -e NODE_ENV=development -e PUBLIC_BASE_URL=http://localhost:$PROXY_PORT \
-      -e ORG_EMAIL_DOMAINS="emulator.test:$ORG" -e ARTIFACT_API_KEYS="emu:$ORG:$key" \
+      -e ORG_EMAIL_DOMAINS="emulator.test:$ORG" -e ARTIFACT_API_KEYS="$api_keys" "${car_env[@]}" \
       -e AUDIT_LEDGER_HMAC_KEY="$audit_key" -e WEBHOOK_ENC_KEY="$webhook_key" \
       "$image" > /dev/null
     docker run -d --name "$PROXY" --network host -v "$HERE":/harness:ro \
@@ -72,6 +84,12 @@ case "$cmd" in
       -e MCP_URL=http://127.0.0.1:$SERVER_PORT/mcp -e MCP_KEY="$key" -w /out \
       "$image" node /harness/publish.mjs "geo-probe.html:emu/geo-probe:Geo probe" \
       "planner.html:emu/road-trip-planner:Road trip planner" "story.html:emu/listen-story:Listen story" > "$OUT/published.txt"
+    if [ "${CAR_SEED:-0}" = 1 ]; then
+      docker run --rm --network host -v "$HERE":/harness:ro \
+        -e MCP_URL=http://127.0.0.1:$SERVER_PORT/mcp -e PROXY=http://127.0.0.1:$PROXY_PORT -e PUBLIC_ORIGIN=http://localhost:$PROXY_PORT \
+        -e HOMELAB_KEY="$homelab_key" -e BOOKCLUB_KEY="$bookclub_key" \
+        "$image" node /harness/car-seed.mjs > "$OUT/car-published.txt"
+    fi
     {
       echo "PROBE_ID=$(awk '$1=="emu/geo-probe"{print $2}' "$OUT/published.txt")"
       echo "PLANNER_ID=$(awk '$1=="emu/road-trip-planner"{print $2}' "$OUT/published.txt")"

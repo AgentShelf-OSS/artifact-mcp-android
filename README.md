@@ -86,16 +86,53 @@ watches and geotriggers, and the shell gets `geo.error` with `reason: "denied"` 
 
 ## Android Auto
 
-The app is an Android Auto **media source** (`automotive_app_desc.xml` declares `media`). The car
-screen shows the playback queue with play, pause and skip, and the current title.
+The app is an Android Auto **media source** (`automotive_app_desc.xml` declares `media`). On
+Android Automotive OS the car media center lists a media app only when it has no launcher
+activity, so the phone APK is not listed there; the debug-only `automotive` build type
+(`build/build.sh assembleAutomotive`, `src/automotive/AndroidManifest.xml`) drops the launcher
+entry and declares `com.android.automotive` for the emulator test (see "Car test"). A released
+AAOS app would need its own module and Play track. Android Auto and AAOS draw every screen themselves; the app supplies
+the browse tree, layout hints, text, artwork and now-playing buttons.
 
-**Library (ADR-0019).** The browse root has one folder per organization. Each folder lists the
-artifacts you can open (newest first, at most 200), with the category as subtitle. The list comes
-from `GET <origin>/api/library` with the WebView's cookies (4 s timeout) and is cached on disk, so
-the car shows the last list when the phone is offline. When the session is missing or expired the
-root shows one item: "Open the app on your phone to sign in". "Now queued" and "Geotrigger stops"
-follow when they have entries. If the car limits the number of root items, the organizations move
-into one "Library" folder.
+**Tabs.** The browse root has up to three tabs, each with a monochrome icon:
+
+| Tab | Shows | Layout |
+| --- | --- | --- |
+| Continue | Up to 20 artifacts you listened to, newest first, as partly played. Empty: "Pick something in Library to start listening". | Grid |
+| Library | One folder per organization (organization-colored cover) -> its artifacts, newest first, under category headings ("Other" last). | List, then grid |
+| Road stories | "Now queued" and "Geotrigger stops", only while there are any. | List |
+
+The library comes from `GET <origin>/api/library` with the WebView's cookies (4 s timeout) and is
+cached on disk. Offline with a cached copy, Library starts with "Can't reach your library right
+now. Showing your last copy."; with no copy it shows "Can't reach your library right now. Check
+your connection." Without a session (403) it shows "Sign in on your phone to see your library".
+These messages are empty folders, not inert entries: the AAOS media center hides entries that are
+neither browsable nor playable. Titles longer than 40 characters are shortened at a word break.
+
+**Covers.** Each artifact gets a generated 512 x 512 cover: the title in Atkinson Hyperlegible Bold
+on navy `#142235` (largest size that fits 4 lines, ellipsis when it does not), a band along the
+bottom in the organization color with the category in white or navy (whichever has more contrast,
+at least 4.5:1 for the fallback palette), and the gold "A" mark. The organization color is
+`orgs[].color` from `/api/library`; without it, one of 8 fixed hues chosen by a hash of the name.
+Organization folders get the color as the field with the name on it. Message entries (sign in,
+offline, empty) show the gold mark on navy. Covers are served by
+`CoverProvider` as `content://<package>.covers/...` URIs. The URI holds the whole cover (kind,
+color, text), so the provider draws it without reading app data; that is why it is exported
+without a permission (the car loads browse artwork in its own process). PNGs are cached in
+`cache/covers` (at most 400) and removed by "Sign out and clear data". The font is under the SIL
+Open Font License ([licenses/AtkinsonHyperlegible-OFL.txt](licenses/AtkinsonHyperlegible-OFL.txt)).
+
+**Now playing.** Artwork is the artifact's cover, the title is the current section, then the
+artifact and the voice. Next to previous, play/pause and next there are two buttons: "Back 15 s"
+(`media.command` `rewind`) and "Speed" with the current rate as its icon (1x, 1.25x, 1.5x; sends
+`speed`, the page cycles and reports `media.session.rate`). They show when the page offers them:
+`rewind`/`speed` in `actions`, or any `rate` (a shell that sends `rate` handles both). For the
+native queue the app seeks back 15 s and cycles the playback speed itself.
+
+**Search and voice.** Search matches artifact titles, categories and organization names in the
+cached library (case and accents ignored, every word must match, title matches first). "Play
+<title> on Artifact MCP" arrives as a search request and plays the best match; "Play Artifact MCP"
+resumes the most recent Continue item.
 
 **Listen in the car.** Picking an artifact opens `<origin>/<id>?listen=autoplay`: in the viewer if
 it is on screen, otherwise in one hidden reader WebView owned by the media service. The shell
@@ -131,11 +168,13 @@ The viewer shell detects the app through the `ArtifactNative` host object. The p
   `audio.queue`, `audio.geotrigger`, `audio.stop`, `notify.show`, `played.ack`, `media.session`.
   App to shell: `ready`, `geo.position`, `geo.error`, `audio.state`, `audio.played`,
   `media.command`, `error`. `ready.capabilities` is `geo.watch`, `audio.queue`,
-  `audio.geotrigger`, `notify`, `media.mirror`, `library`.
-- `media.session {artifactId, state: playing|paused|none, title, artist, album, actions}`: text
-  up to 200 characters (control characters become spaces), `actions` a subset of `play`, `pause`,
-  `next`, `previous`, `stop`. `media.command {artifactId, action}` goes only to the page that sent
-  the session.
+  `audio.geotrigger`, `notify`, `media.mirror`, `library`, `media.rate`.
+- `media.session {artifactId, state: playing|paused|none, title, artist, album, actions, rate?}`:
+  text up to 200 characters (control characters become spaces), `actions` a subset of `play`,
+  `pause`, `next`, `previous`, `stop`, `rewind`, `speed`. `rate` (ADR-0021) is optional, a string
+  such as `"1"`, `"1.25"`, `"0.8"`; the shell sends it only to apps with the `media.rate`
+  capability. Unknown fields and actions are still rejected. `media.command {artifactId, action}`
+  goes only to the page that sent the session.
 - The hidden Listen reader may only load `<origin>/<id>` and `<origin>/<id>?listen=autoplay`; all
   other navigation is blocked (a redirect to the login page shows the sign-in message in the car).
   Its bridge accepts only `hello` and `media.session`. It is the only WebView where media may play
@@ -183,8 +222,10 @@ is `artifact-mcp-android`. The keystore is PKCS12, RSA 4096, valid until 2054.
 
 JVM unit tests (JUnit 4, Truth, Robolectric) cover protocol parsing and validation, origin and
 navigation rules, geotrigger distance and first-entry logic, persistence of played state and
-notices, consent grants and revoke, speech request construction, and notification intent
-targets. Run them with `build/build.sh testDebugUnitTest`.
+notices, consent grants and revoke, speech request construction, notification intent targets,
+and the car: cover layout (fit, ellipsis, contrast choice, palette), cover rendering and URIs, the
+browse tree and its extras, offline and signed-out entries, search, recent items, and the
+now-playing button mapping. Run them with `build/build.sh testDebugUnitTest`.
 
 Not tested by the JVM tests: WebView behaviour, the foreground services, ExoPlayer and Media3 on a
 device, and Android Auto. The emulator test below covers the viewer part.
@@ -238,10 +279,30 @@ build/emulator/server.sh down && build/emulator/run.sh down
   viewer with the screen off. It screenshots the media notification (`listen-*-notification.png`)
   and saves `dumpsys media_session`.
 
+### Car test (Android Automotive OS)
+
+```sh
+build/build.sh assembleAutomotive assembleDebugAndroidTest   # one run: the same debug key
+EMU_PROFILE=car build/emulator/run.sh up         # AAOS 15 (android-35-ext15 android-automotive x86_64)
+CAR_SEED=1 ARTIFACT_MCP_SRC=../artifact-mcp build/emulator/server.sh up
+build/emulator/test-car.sh                       # screenshots in /tmp/emulator-test/car/
+```
+
+`EMU_PROFILE=car` boots a 1408 x 792 AAOS emulator in its own container
+(`artifact-mcp-android-car`, adb serial `emulator-5556`). `CAR_SEED=1` makes the test identity an
+administrator and publishes `car-seed.mjs`: organizations "homelab" (gallery color) and "bookclub"
+(no color) with categorized stories. `test-car.sh` installs the `automotive` APK, sets the origin
+(`CarSetup`), opens the car media center on the app and drives it with UI Automator: tabs,
+Library, an organization grid, now playing with the two buttons (speed round trip), Continue,
+search, a voice-style `playFromSearch`, offline with a cached library and signed out.
+
 ## Limitations
 
-- No test yet in a real car or the Desktop Head Unit. The emulator covers the viewer, the media
-  library through the legacy browser API, the notification and screen-off Listen playback.
+- No test yet in a real car or the Desktop Head Unit. The emulators cover the viewer, the media
+  library through the legacy browser API, the notification, screen-off Listen playback, and the
+  car design in the Android Automotive media center (not Android Auto's own renderer).
+- Continue shows "partly played" without a percentage: `media.session` has no position or
+  section count yet.
 - Phase 2 car surfaces (Car App Library templates) are not built.
 - Google sign-in through Cloudflare Access cannot work in the WebView. Use the email one-time PIN.
   Alternatives for later: an Access service token or a dedicated Access application for the app.

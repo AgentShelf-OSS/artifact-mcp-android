@@ -37,7 +37,10 @@ object Protocol {
     const val MAX_MEDIA_TEXT = 200
     const val MAX_MEDIA_ACTIONS = 8
 
-    val CAPABILITIES = listOf("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library")
+    /** Listen speed in `media.session.rate`: "1", "1.25", "0.8", "2" (0 to 99.99). */
+    private val MEDIA_RATE = Regex("^(?:0|[1-9][0-9]?)(?:\\.[0-9]{1,2})?$")
+
+    val CAPABILITIES = listOf("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library", "media.rate")
 
     private val ARTIFACT_ID = Regex("^[A-Za-z0-9_-]{1,64}$")
     private val VOICE = Regex("^[A-Za-z0-9_-]{1,64}$")
@@ -82,6 +85,12 @@ object Protocol {
         NEXT("next"),
         PREVIOUS("previous"),
         STOP("stop"),
+
+        /** Back 15 seconds (the shell decides how far; the car button says 15 s). */
+        REWIND("rewind"),
+
+        /** Cycle the Listen speed; the shell reports the new value in `media.session.rate`. */
+        SPEED("speed"),
         ;
 
         companion object {
@@ -134,6 +143,8 @@ object Protocol {
             val artist: String,
             val album: String,
             val actions: Set<MediaAction>,
+            /** Listen speed ("1", "1.25"), sent only to apps with the `media.rate` capability. */
+            val rate: String? = null,
         ) : Inbound
     }
 
@@ -238,7 +249,7 @@ object Protocol {
                 Inbound.PlayedAck(artifactId(o), ids)
             }
             "media.session" -> {
-                keys(o, "v", "type", "artifactId", "state", "title", "artist", "album", "actions")
+                keys(o, "v", "type", "artifactId", "state", "title", "artist", "album", "actions", "rate")
                 val state = MediaState.of(string(o, "state")) ?: throw Reject()
                 val actions = (o["actions"] ?: JsonArray(emptyList())) as? JsonArray ?: throw Reject()
                 if (actions.size > MAX_MEDIA_ACTIONS) throw Reject(Reason.LIMIT)
@@ -254,6 +265,9 @@ object Protocol {
                     artist = mediaText(o, "artist"),
                     album = mediaText(o, "album"),
                     actions = if (state == MediaState.NONE) emptySet() else parsedActions,
+                    rate = (if (o["rate"] is kotlinx.serialization.json.JsonNull) null else optionalString(o, "rate"))
+                        ?.also { if (!MEDIA_RATE.matches(it)) throw Reject() }
+                        ?.takeIf { state != MediaState.NONE },
                 )
             }
             else -> throw Reject(Reason.UNSUPPORTED)

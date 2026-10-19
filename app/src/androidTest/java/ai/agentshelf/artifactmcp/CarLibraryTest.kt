@@ -126,25 +126,46 @@ class CarLibraryTest {
         setOrigin(signedOut)
         val browser = connect()
         val root = children(browser, browser.root)
-        check("signed out: one non-playable sign-in item", root.size == 1 && root[0].mediaId == "signin" && !root[0].isPlayable)
+        check("tabs: Continue and Library", root.map { it.mediaId } == listOf("continue", "library") && root.all { it.isBrowsable })
+        check("tabs: each has a drawable icon", root.all { it.description.iconUri?.scheme == "android.resource" })
+        val library = children(browser, "library")
+        check("signed out: one non-playable sign-in item", library.size == 1 && library[0].mediaId == "signin" && !library[0].isPlayable)
         browser.disconnect()
         setOrigin(origin)
+    }
+
+    /** Covers are content:// URIs another app can open (the car loads them itself). */
+    private fun coverReadable(item: MediaBrowser.MediaItem): Boolean {
+        val uri = item.description.iconUri ?: return false
+        if (uri.scheme != "content") return false
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return false
+        return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.width == 512
     }
 
     @Test fun readerPlaysFromTheCarLibrary() {
         setOrigin(origin)
         val browser = connect()
         val root = children(browser, browser.root)
-        val org = root.firstOrNull { it.mediaId?.startsWith("org:") == true }
-        check("library: root lists organization folders", org != null && org.isBrowsable)
-        val items = children(browser, org!!.mediaId!!)
-        val item = items.firstOrNull { it.mediaId == "art:$artifactId" }
+        check("tabs: root starts with Continue and Library", root.take(2).map { it.mediaId } == listOf("continue", "library"))
+        val orgs = children(browser, "library").filter { it.mediaId?.startsWith("org:") == true }
+        check("library: the Library tab lists organization folders", orgs.isNotEmpty() && orgs.all { it.isBrowsable })
+        check("library: organization folders have covers", coverReadable(orgs.first()))
+        // An administrator sees every organization: look for the story in each folder.
+        val item = orgs.asSequence().flatMap { children(browser, it.mediaId!!).asSequence() }.firstOrNull { it.mediaId == "art:$artifactId" }
         check("library: the story artifact is a playable item", item != null && item.isPlayable)
+        check("library: artifacts have covers and a category group", coverReadable(item!!) &&
+            item.description.extras?.getString("android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT") != null)
 
         val controller = controller(browser)
         controller.transportControls.playFromMediaId("art:$artifactId", null)
         check("reader: Listen starts and the mirror shows playing", waitState(controller, PlaybackState.STATE_PLAYING, 120_000) { title(it) != null }, controller)
         mark("reader-playing", describe(controller))
+        val art = controller.metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART) ?: controller.metadata?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+        log("${if (art != null) "PASS" else "INFO"} now playing: artwork bitmap ${art?.width}x${art?.height}")
+        val custom = controller.playbackState?.customActions.orEmpty().map { it.action }
+        log("INFO now playing: custom actions $custom")
+        val continueTab = children(browser, "continue")
+        check("continue: the playing artifact is listed first", continueTab.firstOrNull()?.mediaId == "art:$artifactId")
 
         val first = title(controller)
         controller.transportControls.skipToNext()

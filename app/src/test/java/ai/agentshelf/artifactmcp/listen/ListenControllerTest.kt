@@ -117,6 +117,28 @@ class ListenControllerTest {
         assertThat(page.commands()).containsExactly("pause")
     }
 
+    @Test fun `rewind and speed go to a page that reports a rate or lists them`() {
+        val classic = setOf(MediaAction.PLAY, MediaAction.PAUSE, MediaAction.NEXT, MediaAction.PREVIOUS, MediaAction.STOP)
+        val old = Page("book", Any())
+        listen.onMediaSession(session(MediaState.PLAYING).copy(actions = classic), old)
+        listen.command(MediaAction.REWIND)
+        listen.command(MediaAction.SPEED)
+        assertThat(old.commands()).isEmpty()
+
+        // An ADR-0021 shell sends `rate` but still lists the original five actions.
+        listen.onMediaSession(session(MediaState.PLAYING).copy(actions = classic, rate = "1.25"), old)
+        assertThat(listen.mirror?.rate).isEqualTo("1.25")
+        listen.command(MediaAction.REWIND)
+        listen.command(MediaAction.SPEED)
+        assertThat(old.commands()).containsExactly("rewind", "speed").inOrder()
+
+        val listing = Page("other", Any())
+        listen.onMediaSession(session(MediaState.PLAYING, artifactId = "other").copy(actions = classic + MediaAction.REWIND), listing)
+        listen.command(MediaAction.REWIND)
+        listen.command(MediaAction.SPEED)
+        assertThat(listing.commands()).containsExactly("rewind")
+    }
+
     @Test fun `a broken reply channel ends the mirror`() {
         val page = Page("book", Any())
         listen.onMediaSession(session(MediaState.PLAYING), page)

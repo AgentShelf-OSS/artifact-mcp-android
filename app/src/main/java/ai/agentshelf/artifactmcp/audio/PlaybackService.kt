@@ -3,25 +3,42 @@ package ai.agentshelf.artifactmcp.audio
 import ai.agentshelf.artifactmcp.ArtifactApp
 import ai.agentshelf.artifactmcp.R
 import ai.agentshelf.artifactmcp.bridge.Protocol
+import ai.agentshelf.artifactmcp.bridge.Protocol.MediaAction
+import ai.agentshelf.artifactmcp.car.CarCommands
+import ai.agentshelf.artifactmcp.car.CoverUris
+import ai.agentshelf.artifactmcp.library.Artwork
 import ai.agentshelf.artifactmcp.library.BrowseNode
+import ai.agentshelf.artifactmcp.library.ChildStyle
+import ai.agentshelf.artifactmcp.library.Completion
 import ai.agentshelf.artifactmcp.library.LibraryTree
 import ai.agentshelf.artifactmcp.library.LibraryView
+import ai.agentshelf.artifactmcp.listen.MirrorState
 import ai.agentshelf.artifactmcp.listen.PlaybackArbiter
 import ai.agentshelf.artifactmcp.ui.MainActivity
+import android.annotation.SuppressLint
 import android.app.PendingIntent
+import android.content.ContentResolver
 import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
-import androidx.annotation.OptIn
+import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaConstants
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -30,13 +47,6 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/**
- * Who may control playback through the exported media service.
- *
- * Media3 identifies callers by package and uid. Accepted: this app, the system media
- * notification controller, Android Auto (phone projection, `gearhead`), Android Automotive
- * controllers, and the system UI. Everything else is rejected in `onConnect`.
- */
 object ControllerPolicy {
     const val ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead"
     private val TRUSTED_SYSTEM_PACKAGES = setOf(ANDROID_AUTO_PACKAGE, "com.android.systemui")
@@ -55,13 +65,12 @@ object ControllerPolicy {
 }
 
 /**
- * Browse tree ids. Queue entries use the player's own `q:` media ids; the car library uses
- * `org:<name>` folders and `art:<artifactId>` items ([LibraryTree]).
+ * Browse tree ids. Queue entries use the player's own `q:` media ids and geotrigger stops
+ * `t:` ids (both in the Road stories tab); the car library uses tabs, `org:<name>` folders and
+ * `art:<artifactId>` items ([LibraryTree]).
  */
 object BrowseTree {
     const val ROOT = "root"
-    const val QUEUE = "queue"
-    const val TRIGGERS = "triggers"
 
     fun triggerId(artifactId: String, itemId: String) = "t:$artifactId:${itemId.length}:$itemId"
 
@@ -78,18 +87,54 @@ object BrowseTree {
     }
 }
 
+
+/**
+ * The media session for the phone notification, Android Auto and Android Automotive.
+ *
+ * The browse tree is [LibraryTree] (tabs Continue, Library, Road stories). Covers are
+ * `content://` URIs of [ai.agentshelf.artifactmcp.car.CoverProvider]; tab icons are vector
+ * drawables as `android.resource` URIs. Now playing gets two custom buttons ([CarCommands]).
+ */
+// Media3 marks several session APIs used here as unstable (button slots and preferences, media
+// metadata extras, controller identity checks).
+@OptIn(UnstableApi::class)
 class PlaybackService : MediaLibraryService() {
+    private companion object {
+        const val TAG = "ArtifactCar"
+    }
+
     private var session: MediaLibrarySession? = null
     private val scope = MainScope()
     private val main = Handler(Looper.getMainLooper())
 
-    /** Root hints from the last `onGetLibraryRoot` (Android Auto sends a child limit). */
+    /** Root hint from the last `onGetLibraryRoot` (Android Auto sends a child limit). */
     private var rootLimit = Int.MAX_VALUE
-    private var browsableOnlyAtRoot = false
 
     private val app get() = application as ArtifactApp
 
-    private val onActive: (PlaybackArbiter.Source) -> Unit = { source -> applyPlayer(source) }
+    private var buttons: List<CarCommands.Button> = emptyList()
+
+    private val onActive: (PlaybackArbiter.Source) -> Unit = { source ->
+        applyPlayer(source)
+        updateButtons()
+    }
+    private val onListen: () -> Unit = { updateButtons() }
+    private val onRecents: () -> Unit = {
+        session?.notifyChildrenChanged(LibraryTree.CONTINUE, Int.MAX_VALUE, null)
+        session?.notifyChildrenChanged(BrowseTree.ROOT, Int.MAX_VALUE, null)
+    }
+    private var hadRoadStories = false
+    private val nativeEvents = object : Player.Listener {
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            val road = hasRoadStories()
+            if (road != hadRoadStories) session?.notifyChildrenChanged(BrowseTree.ROOT, Int.MAX_VALUE, null)
+            hadRoadStories = road
+            session?.notifyChildrenChanged(LibraryTree.ROAD, Int.MAX_VALUE, null)
+            updateButtons()
+        }
+
+        override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) = updateButtons()
+    }
 
     @OptIn(UnstableApi::class) // DefaultMediaNotificationProvider customization
     override fun onCreate() {
@@ -104,10 +149,16 @@ class PlaybackService : MediaLibraryService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val active = if (app.arbiter.active == PlaybackArbiter.Source.MIRROR) app.mirrorPlayer else app.audio.player
+        buttons = currentButtons()
         session = MediaLibrarySession.Builder(this, active, LibraryCallback())
             .setSessionActivity(open)
+            .setMediaButtonPreferences(commandButtons(buttons))
             .build()
         app.addActiveSourceListener(onActive)
+        app.listen.addListener(onListen)
+        app.recents.addListener(onRecents)
+        app.audio.player.addListener(nativeEvents)
+        hadRoadStories = hasRoadStories()
     }
 
     /** Last active wins: the session shows the native queue or the Listen mirror. */
@@ -121,6 +172,9 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         app.removeActiveSourceListener(onActive)
+        app.listen.removeListener(onListen)
+        app.recents.removeListener(onRecents)
+        app.audio.player.removeListener(nativeEvents)
         scope.cancel()
         // The reader WebView is owned by this service: it ends with it.
         app.listen.destroyReader()
@@ -130,11 +184,146 @@ class PlaybackService : MediaLibraryService() {
         super.onDestroy()
     }
 
-    private fun folder(id: String, title: String): MediaItem = MediaItem.Builder()
-        .setMediaId(id)
+    // ---- custom now-playing buttons ------------------------------------------------------------
+
+    private fun labels() = CarCommands.Labels(getString(R.string.car_rewind), getString(R.string.car_speed))
+
+    /** Buttons for the active source: the Listen page's actions, or the native queue. */
+    private fun currentButtons(): List<CarCommands.Button> {
+        if (app.arbiter.active == PlaybackArbiter.Source.MIRROR) {
+            val mirror = app.listen.mirror
+            val live = mirror != null && (mirror.phase == MirrorState.Phase.PLAYING || mirror.phase == MirrorState.Phase.PAUSED)
+            return CarCommands.buttons(
+                rewind = live && mirror!!.supports(MediaAction.REWIND),
+                speed = live && mirror!!.supports(MediaAction.SPEED),
+                rate = mirror?.rate,
+                labels = labels(),
+            )
+        }
+        val player = app.audio.player
+        val hasItem = player.mediaItemCount > 0
+        return CarCommands.buttons(hasItem, hasItem, CarCommands.rateString(player.playbackParameters.speed), labels())
+    }
+
+    // CommandButton slots and custom icons; the slots come from CommandButton.SLOT_* constants
+    // in CarCommands (lint cannot follow them through the list).
+    @SuppressLint("WrongConstant")
+    @OptIn(UnstableApi::class)
+    private fun commandButtons(list: List<CarCommands.Button>): List<CommandButton> = list.map { b ->
+        CommandButton.Builder(b.icon)
+            .setSessionCommand(SessionCommand(b.command, Bundle.EMPTY))
+            .setDisplayName(b.displayName)
+            .setSlots(*b.slots.toIntArray())
+            .apply { if (b.customIcon == "ic_speed_1_25") setCustomIconResId(R.drawable.ic_speed_1_25) }
+            .build()
+    }
+
+    @OptIn(UnstableApi::class) // MediaSession.setMediaButtonPreferences
+    private fun updateButtons() {
+        val next = currentButtons()
+        if (next == buttons) return
+        buttons = next
+        session?.setMediaButtonPreferences(commandButtons(next))
+    }
+
+    private fun runCustom(action: MediaAction) {
+        if (app.arbiter.active == PlaybackArbiter.Source.MIRROR) {
+            app.listen.command(action)
+            return
+        }
+        val player = app.audio.player
+        when (action) {
+            MediaAction.REWIND -> player.seekTo(CarCommands.rewindTarget(player.currentPosition))
+            MediaAction.SPEED -> player.setPlaybackSpeed(CarCommands.nextNativeRate(player.playbackParameters.speed))
+            else -> Unit
+        }
+    }
+
+    // ---- browse items --------------------------------------------------------------------------
+
+    private fun strings() = LibraryTree.Strings(
+        continueTab = getString(R.string.car_tab_continue),
+        libraryTab = getString(R.string.car_tab_library),
+        roadTab = getString(R.string.car_tab_road),
+        continueEmpty = getString(R.string.car_continue_empty),
+        signedOut = getString(R.string.car_signed_out),
+        stale = getString(R.string.car_stale),
+        offline = getString(R.string.car_offline),
+        empty = getString(R.string.car_empty),
+        other = getString(R.string.car_other),
+    )
+
+    private fun iconRes(name: String): Int = when (name) {
+        LibraryTree.ICON_CONTINUE -> R.drawable.ic_tab_continue
+        LibraryTree.ICON_LIBRARY -> R.drawable.ic_tab_library
+        LibraryTree.ICON_ROAD -> R.drawable.ic_tab_road
+        else -> 0
+    }
+
+    private fun artworkUri(artwork: Artwork?): Uri? = when (artwork) {
+        null -> null
+        is Artwork.Cover -> CoverUris.uri(packageName, artwork.spec)
+        // The named form (package/drawable/name): the car media center resolves it with
+        // getIdentifier and does not accept numeric ids. res/raw/keep.xml keeps the names.
+        is Artwork.Icon -> iconRes(artwork.drawable).takeIf { it != 0 }?.let {
+            Uri.Builder().scheme(ContentResolver.SCHEME_ANDROID_RESOURCE).authority(resources.getResourcePackageName(it))
+                .appendPath(resources.getResourceTypeName(it)).appendPath(resources.getResourceEntryName(it)).build()
+        }
+    }
+
+    private fun styleValue(style: ChildStyle) = when (style) {
+        ChildStyle.LIST -> MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
+        ChildStyle.GRID -> MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+    }
+
+    private fun completionValue(status: Completion.Status) = when (status) {
+        Completion.Status.NOT_PLAYED -> MediaConstants.EXTRAS_VALUE_COMPLETION_STATUS_NOT_PLAYED
+        Completion.Status.PARTIALLY_PLAYED -> MediaConstants.EXTRAS_VALUE_COMPLETION_STATUS_PARTIALLY_PLAYED
+        Completion.Status.FULLY_PLAYED -> MediaConstants.EXTRAS_VALUE_COMPLETION_STATUS_FULLY_PLAYED
+    }
+
+    private fun extras(node: BrowseNode): Bundle? {
+        if (node.style == null && node.groupTitle == null && node.completion == null) return null
+        return Bundle().apply {
+            node.style?.let {
+                putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE, styleValue(it.browsable))
+                putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, styleValue(it.playable))
+            }
+            node.groupTitle?.let { putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, it) }
+            node.completion?.let { c ->
+                putInt(MediaConstants.EXTRAS_KEY_COMPLETION_STATUS, completionValue(c.status))
+                c.fraction?.let { putDouble(MediaConstants.EXTRAS_KEY_COMPLETION_PERCENTAGE, it) }
+            }
+        }
+    }
+
+    private fun node(node: BrowseNode): MediaItem = MediaItem.Builder()
+        .setMediaId(node.id)
         .setMediaMetadata(
             MediaMetadata.Builder()
-                .setTitle(title)
+                .setTitle(node.title)
+                .setDisplayTitle(node.title)
+                .setSubtitle(node.subtitle)
+                .setIsBrowsable(node.browsable)
+                .setIsPlayable(node.playable)
+                .setArtworkUri(artworkUri(node.artwork))
+                .setExtras(extras(node))
+                .setMediaType(
+                    when {
+                        node.browsable -> MediaMetadata.MEDIA_TYPE_FOLDER_MIXED
+                        node.playable -> MediaMetadata.MEDIA_TYPE_AUDIO_BOOK_CHAPTER
+                        else -> MediaMetadata.MEDIA_TYPE_MIXED
+                    },
+                )
+                .build(),
+        )
+        .build()
+
+    private fun rootItem(): MediaItem = MediaItem.Builder()
+        .setMediaId(BrowseTree.ROOT)
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(getString(R.string.app_name))
                 .setIsBrowsable(true)
                 .setIsPlayable(false)
                 .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
@@ -142,28 +331,12 @@ class PlaybackService : MediaLibraryService() {
         )
         .build()
 
-    private fun node(node: BrowseNode): MediaItem {
-        if (node.browsable) return folder(node.id, node.title)
-        return MediaItem.Builder()
-            .setMediaId(node.id)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(node.title)
-                    .setSubtitle(node.subtitle)
-                    .setIsBrowsable(false)
-                    .setIsPlayable(node.playable)
-                    .setMediaType(if (node.playable) MediaMetadata.MEDIA_TYPE_AUDIO_BOOK_CHAPTER else MediaMetadata.MEDIA_TYPE_MIXED)
-                    .build(),
-            )
-            .build()
+    private fun withGroup(item: MediaItem, group: String): MediaItem {
+        val extras = Bundle(item.mediaMetadata.extras ?: Bundle.EMPTY).apply {
+            putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, group)
+        }
+        return item.buildUpon().setMediaMetadata(item.mediaMetadata.buildUpon().setExtras(extras).build()).build()
     }
-
-    private fun strings() = LibraryTree.Strings(
-        library = getString(R.string.browse_library),
-        signIn = getString(R.string.browse_sign_in),
-        offline = getString(R.string.browse_offline),
-        empty = getString(R.string.browse_empty),
-    )
 
     private fun triggerItems(): List<MediaItem> = app.hub.activeTriggers.flatMap { (artifactId, set) ->
         val label = app.hub.label(artifactId)
@@ -172,7 +345,7 @@ class PlaybackService : MediaLibraryService() {
                 .setMediaId(BrowseTree.triggerId(artifactId, trigger.item.id))
                 .setMediaMetadata(
                     MediaMetadata.Builder()
-                        .setTitle(trigger.item.title)
+                        .setTitle(LibraryTree.shortTitle(trigger.item.title))
                         .setArtist(label)
                         .setIsBrowsable(false)
                         .setIsPlayable(true)
@@ -183,36 +356,47 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
-    private fun nativeFolders(): List<BrowseNode> = buildList {
-        if (app.audio.queueItems().isNotEmpty()) add(BrowseNode(BrowseTree.QUEUE, getString(R.string.browse_queue), browsable = true, playable = false))
-        if (app.hub.activeTriggers.isNotEmpty()) add(BrowseNode(BrowseTree.TRIGGERS, getString(R.string.browse_triggers), browsable = true, playable = false))
-    }
+    private fun hasRoadStories() = app.audio.queueItems().isNotEmpty() || app.hub.activeTriggers.isNotEmpty()
 
-    /** The library as last known: the latest fetch, else the disk cache. */
-    private fun knownLibrary(): LibraryView = app.library.last
-        ?: app.library.cached()?.let { LibraryView.Ready(it, fromCache = true) }
-        ?: LibraryView.Unavailable
+    /** Road stories: the queue, then the geotrigger stops, each under its heading. */
+    private fun roadItems(): List<MediaItem> =
+        app.audio.queueItems().map { withGroup(it, getString(R.string.car_queue)) } +
+            triggerItems().map { withGroup(it, getString(R.string.car_triggers)) }
 
-    private fun children(parentId: String, view: LibraryView): List<MediaItem>? = when (parentId) {
-        BrowseTree.ROOT -> LibraryTree.root(view, nativeFolders(), strings(), rootLimit, browsableOnlyAtRoot).map(::node)
-        LibraryTree.LIBRARY -> LibraryTree.libraryFolder(view, strings()).map(::node)
-        BrowseTree.QUEUE -> app.audio.queueItems()
-        BrowseTree.TRIGGERS -> triggerItems()
-        else -> LibraryTree.orgChildren(view, parentId)?.map(::node)
+    private fun recents() = app.recents.forOrigin(app.originStore.origin)
+
+    private fun children(parentId: String, view: LibraryView): List<MediaItem>? {
+        val map = ::node
+        return when (parentId) {
+            BrowseTree.ROOT -> LibraryTree.root(strings(), hasRoadStories(), rootLimit).map(map)
+            LibraryTree.CONTINUE -> LibraryTree.continueChildren(recents(), strings()).map(map)
+            LibraryTree.LIBRARY -> LibraryTree.libraryChildren(view, strings()).map(map)
+            LibraryTree.ROAD -> roadItems()
+            in LibraryTree.MESSAGES -> emptyList()
+            else -> LibraryTree.orgChildren(view, parentId, strings())?.map(map)
+        }
     }
 
     /** Media item of a library artifact (title from the library when known). */
     private fun libraryItem(artifactId: String): MediaItem {
-        val artifact = (knownLibrary() as? LibraryView.Ready)?.library?.find(artifactId)
+        val library = (app.library.known() as? LibraryView.Ready)?.library
+        val artifact = library?.find(artifactId)
+        val org = library?.orgOf(artifactId)
+        if (artifact != null && org != null) return node(LibraryTree.artifactNode(artifact, org, subtitle = artifact.category.ifBlank { null }))
+        val recent = recents().firstOrNull { it.artifactId == artifactId }
+        val title = recent?.title ?: app.hub.label(artifactId)
         return node(
             BrowseNode(
                 LibraryTree.artifactMediaId(artifactId),
-                artifact?.title ?: app.hub.label(artifactId),
-                artifact?.category?.ifBlank { null },
+                LibraryTree.shortTitle(title),
+                recent?.category?.ifBlank { null },
                 browsable = false,
                 playable = true,
+                artwork = null,
             ),
-        )
+        ).let { item ->
+            item.buildUpon().setMediaMetadata(item.mediaMetadata.buildUpon().setArtworkUri(app.artifactCover(artifactId, title)).build()).build()
+        }
     }
 
     /**
@@ -221,11 +405,36 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun startLibraryItem(artifactId: String): ListenableFuture<MediaItem>? {
         val item = libraryItem(artifactId)
-        if (!app.listen.playFromLibrary(artifactId, item.mediaMetadata.title?.toString().orEmpty())) return null
+        val title = (app.library.known() as? LibraryView.Ready)?.library?.find(artifactId)?.title
+            ?: item.mediaMetadata.title?.toString().orEmpty()
+        if (!app.listen.playFromLibrary(artifactId, title)) return null
         applyPlayer(app.arbiter.active)
         val result = SettableFuture.create<MediaItem>()
         main.post { result.set(item) }
         return result
+    }
+
+    /**
+     * The artifact a search request stands for ("play <title> on Artifact MCP"): the best match
+     * in the library; for an empty query ("play Artifact MCP") the most recent one.
+     */
+    private fun searchPick(query: String): String? {
+        if (LibraryTree.searchTerms(query).isEmpty()) return recents().firstOrNull()?.artifactId
+        val library = (app.library.known() as? LibraryView.Ready)?.library ?: return null
+        return LibraryTree.search(library, query).firstOrNull()?.second?.id
+    }
+
+    private fun <T> page(items: List<T>, page: Int, pageSize: Int): List<T> {
+        val size = pageSize.coerceAtLeast(1).toLong()
+        val from = (page.coerceAtLeast(0).toLong() * size).coerceAtMost(items.size.toLong()).toInt()
+        val to = (from.toLong() + size).coerceAtMost(items.size.toLong()).toInt()
+        return items.subList(from, to)
+    }
+
+    /** The library for search: the known copy, else a fresh fetch. */
+    private fun withLibrary(block: (LibraryView) -> Unit) {
+        val known = app.library.known()
+        if (known is LibraryView.Ready) block(known) else scope.launch { block(app.library.refresh()) }
     }
 
     // Controller identity checks and MediaItemsWithStartPosition are marked unstable in Media3.
@@ -240,7 +449,26 @@ class PlaybackService : MediaLibraryService() {
                 isAutomotiveController = session.isAutomotiveController(controller),
             )
             if (!allowed) return MediaSession.ConnectionResult.reject()
-            return super.onConnect(session, controller)
+            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+                .add(SessionCommand(CarCommands.REWIND, Bundle.EMPTY))
+                .add(SessionCommand(CarCommands.SPEED, Bundle.EMPTY))
+                .build()
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(commands)
+                .setMediaButtonPreferences(commandButtons(buttons))
+                .build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle,
+        ): ListenableFuture<SessionResult> {
+            val action = CarCommands.action(customCommand.customAction)
+                ?: return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
+            runCustom(action)
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
 
         override fun onGetLibraryRoot(
@@ -251,10 +479,14 @@ class PlaybackService : MediaLibraryService() {
             params?.extras?.let { extras ->
                 val limit = extras.getInt(MediaConstants.EXTRAS_KEY_ROOT_CHILDREN_LIMIT, 0)
                 rootLimit = if (limit > 0) limit else Int.MAX_VALUE
-                browsableOnlyAtRoot = extras.getBoolean(MediaConstants.EXTRA_KEY_ROOT_CHILDREN_BROWSABLE_ONLY, false) ||
-                    extras.getInt(ROOT_SUPPORTED_FLAGS, 0) == FLAG_BROWSABLE
             }
-            return Futures.immediateFuture(LibraryResult.ofItem(folder(BrowseTree.ROOT, getString(R.string.app_name)), params))
+            // Defaults for folders without their own hint; each tab sets its own style.
+            val rootExtras = Bundle().apply {
+                putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE, MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
+                putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM)
+            }
+            val rootParams = LibraryParams.Builder().setExtras(rootExtras).build()
+            return Futures.immediateFuture(LibraryResult.ofItem(rootItem(), rootParams))
         }
 
         override fun onGetChildren(
@@ -271,17 +503,14 @@ class PlaybackService : MediaLibraryService() {
                 if (items == null) {
                     result.set(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
                 } else {
-                    val size = pageSize.coerceAtLeast(1).toLong()
-                    val from = (page.coerceAtLeast(0).toLong() * size).coerceAtMost(items.size.toLong()).toInt()
-                    val to = (from.toLong() + size).coerceAtMost(items.size.toLong()).toInt()
-                    result.set(LibraryResult.ofItemList(ImmutableList.copyOf(items.subList(from, to)), params))
+                    result.set(LibraryResult.ofItemList(ImmutableList.copyOf(page(items, page, pageSize)), params))
                 }
             }
-            if (parentId == BrowseTree.ROOT || parentId == LibraryTree.LIBRARY) {
+            if (parentId == LibraryTree.LIBRARY) {
                 // Refresh on browse (short timeout; the cache answers when offline).
                 scope.launch { respond(app.library.refresh()) }
             } else {
-                respond(knownLibrary())
+                respond(app.library.known())
             }
             return result
         }
@@ -292,18 +521,77 @@ class PlaybackService : MediaLibraryService() {
             mediaId: String,
         ): ListenableFuture<LibraryResult<MediaItem>> {
             LibraryTree.parseArtifactMediaId(mediaId)?.let { return Futures.immediateFuture(LibraryResult.ofItem(libraryItem(it), null)) }
-            val view = knownLibrary()
-            val all = children(BrowseTree.ROOT, view).orEmpty() + app.audio.queueItems() + triggerItems()
-            val item = all.firstOrNull { it.mediaId == mediaId }
-                ?: LibraryTree.parseOrgId(mediaId)?.takeIf { LibraryTree.orgChildren(view, mediaId) != null }?.let { folder(mediaId, it) }
+            if (mediaId == BrowseTree.ROOT) return Futures.immediateFuture(LibraryResult.ofItem(rootItem(), null))
+            val view = app.library.known()
+            val tabs = children(BrowseTree.ROOT, view).orEmpty()
+            val folder = LibraryTree.parseOrgId(mediaId)?.let { name ->
+                (view as? LibraryView.Ready)?.library?.org(name)?.let { node(LibraryTree.orgFolder(it)) }
+            }
+            val item = folder
+                ?: (tabs + children(LibraryTree.LIBRARY, view).orEmpty() + children(LibraryTree.CONTINUE, view).orEmpty() + roadItems())
+                    .firstOrNull { it.mediaId == mediaId }
                 ?: return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
             return Futures.immediateFuture(LibraryResult.ofItem(item, null))
         }
 
+        override fun onSearch(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<Void>> {
+            withLibrary { view ->
+                val count = (view as? LibraryView.Ready)?.let { LibraryTree.search(it.library, query).size } ?: 0
+                session.notifySearchResultChanged(browser, query, count, params)
+            }
+            return Futures.immediateFuture(LibraryResult.ofVoid())
+        }
+
+        override fun onGetSearchResult(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            val result = SettableFuture.create<LibraryResult<ImmutableList<MediaItem>>>()
+            withLibrary { view ->
+                val items = (view as? LibraryView.Ready)?.let { LibraryTree.searchResults(it.library, query) }.orEmpty().map(::node)
+                result.set(LibraryResult.ofItemList(ImmutableList.copyOf(page(items, page, pageSize)), params))
+            }
+            return result
+        }
+
+        /** The query of a voice or typed "play ..." request (no media id), else null. */
+        private fun searchQuery(item: MediaItem): String? {
+            val query = item.requestMetadata.searchQuery ?: return null
+            return query.takeIf { item.mediaId.isEmpty() || item.mediaId == MediaItem.DEFAULT_MEDIA_ID }
+        }
+
         /**
-         * A controller (for example Android Auto) picked an item. Library artifacts open Listen
-         * (the mirror takes over); queue items seek within the current queue; geotrigger items
-         * are resolved (cached or synthesized) and appended.
+         * Play the best match for [query]; the library is fetched first when none is known yet
+         * (for example right after the app started).
+         */
+        private fun <T> playSearch(query: String, wrap: (MediaItem) -> T): ListenableFuture<T> {
+            val result = SettableFuture.create<T>()
+            withLibrary { view ->
+                val pick = searchPick(query)
+                Log.i(TAG, "play from search: ${view::class.simpleName}, match ${pick != null}")
+                val started = pick?.let(::startLibraryItem)
+                if (started == null) {
+                    result.setException(UnsupportedOperationException("nothing matches"))
+                } else {
+                    result.setFuture(Futures.transform(started, { item -> wrap(item) }, Runnable::run))
+                }
+            }
+            return result
+        }
+
+        /**
+         * A controller (for example Android Auto) picked an item or asked to play a search.
+         * Library artifacts open Listen (the mirror takes over); queue items seek within the
+         * current queue; geotrigger items are resolved (cached or synthesized) and appended.
          */
         override fun onSetMediaItems(
             mediaSession: MediaSession,
@@ -314,6 +602,9 @@ class PlaybackService : MediaLibraryService() {
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             val picked = mediaItems.getOrNull(startIndex.coerceAtLeast(0)) ?: mediaItems.firstOrNull()
                 ?: return Futures.immediateFailedFuture(UnsupportedOperationException())
+            searchQuery(picked)?.let { query ->
+                return playSearch(query) { item -> MediaSession.MediaItemsWithStartPosition(listOf(item), 0, 0L) }
+            }
             LibraryTree.parseArtifactMediaId(picked.mediaId)?.let { artifactId ->
                 val started = startLibraryItem(artifactId) ?: return Futures.immediateFailedFuture(UnsupportedOperationException())
                 return Futures.transform(started, { item -> MediaSession.MediaItemsWithStartPosition(listOf(item), 0, 0L) }, Runnable::run)
@@ -359,6 +650,7 @@ class PlaybackService : MediaLibraryService() {
             mediaItems: MutableList<MediaItem>,
         ): ListenableFuture<MutableList<MediaItem>> {
             // A library artifact cannot be queued behind something else: picking it opens Listen.
+            mediaItems.firstNotNullOfOrNull(::searchQuery)?.let { query -> return playSearch(query) { item -> mutableListOf(item) } }
             mediaItems.firstNotNullOfOrNull { LibraryTree.parseArtifactMediaId(it.mediaId) }?.let { artifactId ->
                 val started = startLibraryItem(artifactId) ?: return Futures.immediateFailedFuture(UnsupportedOperationException())
                 return Futures.transform(started, { item -> mutableListOf(item) }, Runnable::run)
@@ -368,11 +660,5 @@ class PlaybackService : MediaLibraryService() {
             val resolved = mediaItems.mapNotNull { known[it.mediaId] }.toMutableList()
             return Futures.immediateFuture(resolved)
         }
-    }
-
-    private companion object {
-        /** Root hint of Android Auto (MediaBrowserCompat) with the supported root child flags. */
-        const val ROOT_SUPPORTED_FLAGS = "androidx.media.MediaBrowserCompat.Extras.KEY_ROOT_CHILDREN_SUPPORTED_FLAGS"
-        const val FLAG_BROWSABLE = 1
     }
 }

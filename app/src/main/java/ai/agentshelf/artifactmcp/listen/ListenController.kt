@@ -145,6 +145,7 @@ class ListenController(
                 artist = message.artist,
                 album = message.album,
                 actions = message.actions,
+                rate = message.rate,
             ),
         )
     }
@@ -236,7 +237,7 @@ class ListenController(
             }
             MirrorState.Phase.FAILED -> if (action == MediaAction.STOP || action == MediaAction.PAUSE) end()
             MirrorState.Phase.PLAYING, MirrorState.Phase.PAUSED -> {
-                if (action !in current.actions) return
+                if (!current.supports(action)) return
                 if (!send(action)) end()
             }
         }

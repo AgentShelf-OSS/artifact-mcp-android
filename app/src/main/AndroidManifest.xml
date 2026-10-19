@@ -90,6 +90,15 @@
             </intent-filter>
         </service>
 
+        <!-- Car artwork (covers). Exported without a permission on purpose: read-only, and each
+             cover is drawn only from the text in its own URI, so it exposes no app data. Android
+             Auto and the car media center load browse artwork through their own resolver. -->
+        <provider
+            android:name=".car.CoverProvider"
+            android:authorities="${applicationId}.covers"
+            android:exported="true"
+            tools:ignore="ExportedContentProvider" />
+
         <receiver
             android:name=".geo.LocationStopReceiver"
             android:exported="false" />

@@ -320,7 +320,9 @@ async function main() {
   // which shows "Center on me" and the chat box. Location still goes through geo:request.
   openViewer(`${ORIGIN}/${env.PLANNER_ID}`);
   await waitForPage(`${ORIGIN}/${env.PLANNER_ID}`);
-  await waitFor("planner rendered", () => inFrame("document.body.innerText.includes('Drive the whole day')"));
+  // Day 1's text ("Drive the whole day") shows only on the trip's first day; after that the
+  // planner opens on today. "Add a stop" is on every day.
+  await waitFor("planner rendered", () => inFrame("document.body.innerText.includes('Add a stop')"));
   await sleep(3000);
   shot("08-planner-light");
   checkInsets("planner light", { night: false });

@@ -1,6 +1,7 @@
 package ai.agentshelf.artifactmcp.listen
 
 import ai.agentshelf.artifactmcp.bridge.Protocol.MediaAction
+import android.net.Uri
 import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
@@ -26,8 +27,18 @@ data class MirrorState(
     val album: String = "",
     val actions: Set<MediaAction> = emptySet(),
     val error: String? = null,
+    /** Listen speed from `media.session.rate` ("1", "1.25"), when the page reports it. */
+    val rate: String? = null,
 ) {
     enum class Phase { LOADING, PLAYING, PAUSED, FAILED }
+
+    /**
+     * Whether the page takes [action]. `rewind` and `speed` also count as offered when the page
+     * reports a `rate`: a shell that sends `rate` (ADR-0021) handles both, even though its
+     * `actions` list still names only the original five.
+     */
+    fun supports(action: MediaAction): Boolean =
+        action in actions || (rate != null && (action == MediaAction.REWIND || action == MediaAction.SPEED))
 }
 
 /** Maps [MirrorState] to Media3 player state. Kept apart from the player so it can be tested. */
@@ -65,22 +76,35 @@ object MirrorMapping {
         return builder.build()
     }
 
-    fun metadata(mirror: MirrorState): MediaMetadata = MediaMetadata.Builder()
-        .setTitle(mirror.title.ifBlank { "Listen" })
-        .setDisplayTitle(mirror.title.ifBlank { "Listen" })
-        .setArtist(mirror.artist.ifBlank { null })
-        .setAlbumTitle(mirror.album.ifBlank { null })
-        .setIsBrowsable(false)
-        .setIsPlayable(true)
-        .setMediaType(MediaMetadata.MEDIA_TYPE_AUDIO_BOOK_CHAPTER)
-        .build()
+    /**
+     * Now playing: the title is the current chapter or section, the subtitle the artifact
+     * (the library title when known: the page's `album` is its document title, which can carry
+     * the site name), the artist line the voice. [artwork] is the artifact's cover.
+     */
+    fun metadata(mirror: MirrorState, artwork: Uri? = null, artifactTitle: String? = null): MediaMetadata {
+        val title = mirror.title.ifBlank { "Listen" }
+        val artifact = artifactTitle?.ifBlank { null } ?: mirror.album.ifBlank { null }
+        // At the start the section is the artifact's own heading: do not repeat it below.
+        val subtitle = artifact?.takeUnless { it.trim().equals(title.trim(), ignoreCase = true) }
+        return MediaMetadata.Builder()
+            .setTitle(title)
+            .setDisplayTitle(title)
+            .setSubtitle(subtitle)
+            .setArtist(mirror.artist.ifBlank { null })
+            .setAlbumTitle(artifact)
+            .setArtworkUri(artwork)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_AUDIO_BOOK_CHAPTER)
+            .build()
+    }
 
-    fun state(mirror: MirrorState?): SimpleBasePlayer.State {
+    fun state(mirror: MirrorState?, artwork: Uri? = null, artifactTitle: String? = null): SimpleBasePlayer.State {
         val builder = SimpleBasePlayer.State.Builder().setAvailableCommands(commands(mirror))
         if (mirror == null) {
             return builder.setPlaybackState(Player.STATE_IDLE).setPlayWhenReady(false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST).build()
         }
-        val metadata = metadata(mirror)
+        val metadata = metadata(mirror, artwork, artifactTitle)
         val item = SimpleBasePlayer.MediaItemData.Builder(mediaId(mirror.artifactId))
             .setMediaItem(MediaItem.Builder().setMediaId(mediaId(mirror.artifactId)).setMediaMetadata(metadata).build())
             .setMediaMetadata(metadata)
@@ -115,12 +139,25 @@ class MirrorPlayer(looper: Looper, private val onCommand: (MediaAction) -> Unit)
     var mirror: MirrorState? = null
         private set
 
+    /** Cover of the playing artifact (set by the app). */
+    var artwork: (MirrorState) -> Uri? = { null }
+
+    /** Library title of the playing artifact, when known (set by the app). */
+    var artifactTitle: (MirrorState) -> String? = { null }
+
     fun update(next: MirrorState?) {
         mirror = next
         invalidateState()
     }
 
-    override fun getState(): State = MirrorMapping.state(mirror)
+    override fun getState(): State {
+        val current = mirror ?: return MirrorMapping.state(null)
+        return MirrorMapping.state(
+            current,
+            runCatching { artwork(current) }.getOrNull(),
+            runCatching { artifactTitle(current) }.getOrNull(),
+        )
+    }
 
     private fun done(): ListenableFuture<*> = Futures.immediateVoidFuture()
 
