@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Speed 1.25x now-playing button (Media3 has no 1.25 icon). Material Symbols "speed_1_25" (Apache License 2.0), monochrome white as the car asks for. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="960"
+    android:viewportHeight="960">
+    <group android:translateY="960">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M260-280v-80h80v80h-80Zm400 0v-80h160v-80H660v-240h240v80H740v80h80q33 0 56.5 23.5T900-440v80q0 33-23.5 56.5T820-280H660Zm-280 0v-160q0-33 23.5-56.5T460-520h80v-80H380v-80h160q33 0 56.5 23.5T620-600v80q0 33-23.5 56.5T540-440h-80v80h160v80H380Zm-240 0v-320H60v-80h160v400h-80Z" />
+    </group>
+</vector>

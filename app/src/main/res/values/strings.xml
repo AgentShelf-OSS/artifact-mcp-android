@@ -63,10 +63,18 @@
     </plurals>
     <string name="location_stop">Stop</string>
 
-    <string name="browse_queue">Now queued</string>
-    <string name="browse_triggers">Geotrigger stops</string>
-    <string name="browse_library">Library</string>
-    <string name="browse_sign_in">Open the app on your phone to sign in</string>
-    <string name="browse_offline">Library unavailable. Check the phone\'s connection.</string>
-    <string name="browse_empty">No artifacts yet</string>
+    <!-- Car (Android Auto, Android Automotive). Sentence case, short: drivers glance at these. -->
+    <string name="car_tab_continue">Continue</string>
+    <string name="car_tab_library">Library</string>
+    <string name="car_tab_road">Road stories</string>
+    <string name="car_continue_empty">Pick something in Library to start listening</string>
+    <string name="car_signed_out">Sign in on your phone to see your library</string>
+    <string name="car_stale">Can\'t reach your library right now. Showing your last copy.</string>
+    <string name="car_offline">Can\'t reach your library right now. Check your connection.</string>
+    <string name="car_empty">No artifacts yet</string>
+    <string name="car_other">Other</string>
+    <string name="car_queue">Now queued</string>
+    <string name="car_triggers">Geotrigger stops</string>
+    <string name="car_rewind">Back 15 s</string>
+    <string name="car_speed">Speed %1$s</string>
 </resources>

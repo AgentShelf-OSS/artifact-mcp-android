@@ -4,7 +4,10 @@ import ai.agentshelf.artifactmcp.audio.HttpRequestSpec
 import ai.agentshelf.artifactmcp.audio.SpeechException
 import ai.agentshelf.artifactmcp.audio.SpeechRequests
 import ai.agentshelf.artifactmcp.bridge.Protocol
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
@@ -17,14 +20,21 @@ import kotlinx.serialization.json.putJsonArray
 import java.io.File
 import java.io.IOException
 
-/** One artifact in the car library (`GET /api/library`, ADR-0019). */
-data class LibraryArtifact(val id: String, val title: String, val category: String)
+/**
+ * One artifact in the car library (`GET /api/library`, ADR-0019). [updatedAt] is the server's
+ * ISO-8601 timestamp (empty when missing); it orders the library newest first.
+ */
+data class LibraryArtifact(val id: String, val title: String, val category: String, val updatedAt: String = "")
 
-data class LibraryOrg(val org: String, val artifacts: List<LibraryArtifact>)
+/** [color] is the organization's accent as `#RRGGBB`, or null when the server has none. */
+data class LibraryOrg(val org: String, val artifacts: List<LibraryArtifact>, val color: String? = null)
 
 data class Library(val orgs: List<LibraryOrg>) {
     fun find(artifactId: String): LibraryArtifact? = orgs.firstNotNullOfOrNull { org -> org.artifacts.firstOrNull { it.id == artifactId } }
     fun org(name: String): LibraryOrg? = orgs.firstOrNull { it.org == name }
+
+    /** The organization that lists [artifactId]. */
+    fun orgOf(artifactId: String): LibraryOrg? = orgs.firstOrNull { org -> org.artifacts.any { it.id == artifactId } }
 }
 
 /** What the browse tree shows for the library. */
@@ -42,7 +52,18 @@ object LibraryJson {
     const val MAX_TITLE = 200
     const val MAX_ORG = 64
     const val MAX_CATEGORY = 80
-    private const val CACHE_VERSION = 1
+    const val MAX_UPDATED_AT = 40
+    private const val CACHE_VERSION = 2
+    private val HEX6 = Regex("^#[0-9A-Fa-f]{6}$")
+    private val HEX3 = Regex("^#[0-9A-Fa-f]{3}$")
+
+    /** `#RRGGBB` (upper case) for a `#RRGGBB` or `#RGB` value; null for anything else. */
+    fun normalizeColor(value: String?): String? = when {
+        value == null -> null
+        HEX6.matches(value) -> value.uppercase()
+        HEX3.matches(value) -> "#" + value.drop(1).map { "$it$it" }.joinToString("").uppercase()
+        else -> null
+    }
 
     private fun text(value: Any?, max: Int): String? {
         val p = value as? JsonPrimitive ?: return null
@@ -68,9 +89,9 @@ object LibraryJson {
                 val id = (a["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return@mapNotNull null
                 if (!Protocol.isValidArtifactId(id)) return@mapNotNull null
                 val title = text(a["title"], MAX_TITLE)?.takeIf { it.isNotEmpty() } ?: id
-                LibraryArtifact(id, title, text(a["category"], MAX_CATEGORY).orEmpty())
+                LibraryArtifact(id, title, text(a["category"], MAX_CATEGORY).orEmpty(), text(a["updated_at"], MAX_UPDATED_AT).orEmpty())
             }.distinctBy { it.id }.take(MAX_PER_ORG).toList()
-            LibraryOrg(name, artifacts)
+            LibraryOrg(name, artifacts, normalizeColor(text(o["color"], 7)))
         }.take(MAX_ORGS).toList()
         return Library(parsed)
     }
@@ -83,12 +104,14 @@ object LibraryJson {
             library.orgs.forEach { org ->
                 addJsonObject {
                     put("org", org.org)
+                    org.color?.let { put("color", it) }
                     putJsonArray("artifacts") {
                         org.artifacts.forEach { a ->
                             addJsonObject {
                                 put("id", a.id)
                                 put("title", a.title)
                                 put("category", a.category)
+                                put("updated_at", a.updatedAt)
                             }
                         }
                     }
@@ -136,8 +159,15 @@ class LibraryRepository(
     private val fetcher: LibraryFetcher,
     private val timeoutMs: Long = 4_000L,
 ) {
+    private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     @Volatile var last: LibraryView? = null
         private set
+
+    /** The library as last known: the latest fetch, else the disk cache. */
+    fun known(): LibraryView = last
+        ?: runCatching { cached() }.getOrNull()?.let { LibraryView.Ready(it, fromCache = true) }
+        ?: LibraryView.Unavailable
 
     fun cached(): Library? {
         val currentOrigin = origin() ?: return null
@@ -149,9 +179,11 @@ class LibraryRepository(
     suspend fun refresh(): LibraryView {
         val currentOrigin = origin() ?: return LibraryView.Unavailable.also { last = it }
         val spec = LibraryRequests.library(currentOrigin, cookies(currentOrigin), userAgent())
-        val response = withTimeoutOrNull(timeoutMs) {
-            runCatching { runInterruptible(Dispatchers.IO) { fetcher.fetch(spec) } }.getOrNull()
-        }
+        // The call runs on its own: a blocking read that ignores interrupts cannot hold the car's
+        // browse past the timeout (the abandoned call ends with its socket timeouts).
+        val call = io.async { runCatching { runInterruptible { fetcher.fetch(spec) } }.getOrNull() }
+        val response = withTimeoutOrNull(timeoutMs) { call.await() }
+        if (response == null) call.cancel()
         val view = interpret(currentOrigin, response)
         last = view
         return view

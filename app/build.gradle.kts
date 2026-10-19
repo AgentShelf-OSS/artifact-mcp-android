@@ -19,8 +19,8 @@ android {
         applicationId = "ai.agentshelf.artifactmcp"
         minSdk = 29
         targetSdk = 37
-        versionCode = 4
-        versionName = "0.2.1"
+        versionCode = 5
+        versionName = "0.3.0"
         // Emulator-only media browser test (build/emulator/test-listen.sh); not run in CI.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -39,6 +39,14 @@ android {
     }
 
     buildTypes {
+        // Debug build for the Android Automotive OS emulator (build/emulator/test-car.sh). AAOS
+        // lists a media app in its media center only without a launcher activity, so this
+        // variant drops the phone launcher entry (src/automotive/AndroidManifest.xml). Same
+        // application id as debug, so the debug test APK can instrument it. Not released.
+        create("automotive") {
+            initWith(getByName("debug"))
+            matchingFallbacks += "debug"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

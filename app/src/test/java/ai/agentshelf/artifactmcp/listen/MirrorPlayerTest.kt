@@ -37,6 +37,30 @@ class MirrorPlayerTest {
         assertThat(player.currentMediaItem?.mediaId).isEqualTo("art:book")
     }
 
+    @Test fun `now playing shows the section, the artifact below it, the voice and the cover`() {
+        val cover = android.net.Uri.parse("content://ai.agentshelf.artifactmcp.covers/a/142235/eA/-")
+        player.artwork = { if (it.artifactId == "book") cover else null }
+        player.update(state(MirrorState.Phase.PLAYING).copy(rate = "1.25"))
+        idle()
+        val m = player.mediaMetadata
+        assertThat(m.displayTitle.toString()).isEqualTo("Chapter 1")
+        assertThat(m.subtitle.toString()).isEqualTo("Frankenstein")
+        assertThat(m.artist.toString()).isEqualTo("Ava")
+        assertThat(m.artworkUri).isEqualTo(cover)
+        assertThat(player.mirror?.rate).isEqualTo("1.25")
+
+        // The library title replaces the page's document title ("Frankenstein · Artifact Index").
+        player.artifactTitle = { "Frankenstein, read aloud" }
+        player.update(state(MirrorState.Phase.PLAYING).copy(album = "Frankenstein · Artifact Index"))
+        idle()
+        assertThat(player.mediaMetadata.subtitle.toString()).isEqualTo("Frankenstein, read aloud")
+
+        // On the artifact's own heading the subtitle is not repeated.
+        player.update(state(MirrorState.Phase.PLAYING).copy(title = "Frankenstein, read aloud"))
+        idle()
+        assertThat(player.mediaMetadata.subtitle).isNull()
+    }
+
     @Test fun `paused maps to ready without play when ready`() {
         player.update(state(MirrorState.Phase.PAUSED))
         assertThat(player.playbackState).isEqualTo(Player.STATE_READY)

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AUTOMOTIVE DEBUG BUILD ONLY (copy of src/debug; src/automotive overrides src/main). Cleartext is allowed to the loopback hosts
+     so the emulator test can use a local server through `adb reverse` (build/emulator/).
+     Release builds use src/main/res/xml/network_security_config.xml: https only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The car loads tab icons by name (android.resource://<package>/drawable/<name>). -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_tab_continue,@drawable/ic_tab_library,@drawable/ic_tab_road,@drawable/ic_speed_1_25" />

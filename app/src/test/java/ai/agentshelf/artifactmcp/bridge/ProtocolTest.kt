@@ -215,6 +215,27 @@ class ProtocolTest {
         assertThat(error.reason).isEqualTo(Protocol.Reason.LIMIT)
     }
 
+    @Test fun `media session accepts the rewind and speed actions and an optional rate`() {
+        val m = ok(session.replace("\"stop\"]", "\"stop\",\"rewind\",\"speed\"],\"rate\":\"1.25\"")) as Inbound.MediaSession
+        assertThat(m.actions).containsAtLeast(Protocol.MediaAction.REWIND, Protocol.MediaAction.SPEED)
+        assertThat(m.rate).isEqualTo("1.25")
+        assertThat((ok(session) as Inbound.MediaSession).rate).isNull()
+        for (rate in listOf("1", "0.8", "1.5", "2", "1.75")) {
+            assertThat((ok(session.replace("]}", "],\"rate\":\"$rate\"}")) as Inbound.MediaSession).rate).isEqualTo(rate)
+        }
+        assertThat((ok(session.replace("]}", "],\"rate\":null}")) as Inbound.MediaSession).rate).isNull()
+        val none = ok("""{"v":1,"type":"media.session","artifactId":"book","state":"none","title":"","artist":"","album":"","actions":[],"rate":"1"}""") as Inbound.MediaSession
+        assertThat(none.rate).isNull()
+    }
+
+    @Test fun `media session rejects malformed rates and still rejects unknown actions`() {
+        for (rate in listOf("\"fast\"", "1.25", "\"\"", "\"-1\"", "\"1.\"", "\".5\"", "\"01\"", "\"100\"", "\"1.255\"", "\"1e2\"", "\" 1\"")) {
+            invalid(session.replace("]}", "],\"rate\":$rate}"))
+        }
+        invalid(session.replace("\"stop\"]", "\"stop\",\"forward\"]"))
+        invalid(session.replace("\"stop\"]", "\"stop\",\"Rewind\"]"))
+    }
+
     @Test fun `media session text accepts 200 characters and blanks control characters`() {
         val m = ok(session.replace("Chapter 1", "x".repeat(200))) as Inbound.MediaSession
         assertThat(m.title).hasLength(200)
@@ -228,7 +249,11 @@ class ProtocolTest {
         assertThat((o["type"] as JsonPrimitive).content).isEqualTo("media.command")
         assertThat((o["artifactId"] as JsonPrimitive).content).isEqualTo("book")
         assertThat((o["action"] as JsonPrimitive).content).isEqualTo("pause")
-        assertThat(Protocol.MediaAction.entries.map { it.wire }).containsExactly("play", "pause", "next", "previous", "stop")
+        assertThat(Protocol.MediaAction.entries.map { it.wire }).containsExactly("play", "pause", "next", "previous", "stop", "rewind", "speed")
+        val rewind = Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.REWIND)) as JsonObject
+        assertThat((rewind["action"] as JsonPrimitive).content).isEqualTo("rewind")
+        val speed = Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.SPEED)) as JsonObject
+        assertThat((speed["action"] as JsonPrimitive).content).isEqualTo("speed")
     }
 
     @Test fun `ready reply lists the capabilities`() {
@@ -237,7 +262,7 @@ class ProtocolTest {
         assertThat((o["type"] as JsonPrimitive).content).isEqualTo("ready")
         assertThat((o["app"] as JsonPrimitive).content).isEqualTo("0.1.0")
         assertThat((o["capabilities"] as JsonArray).map { (it as JsonPrimitive).content })
-            .containsExactly("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library").inOrder()
+            .containsExactly("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library", "media.rate").inOrder()
     }
 
     @Test fun `outbound messages carry the protocol field names`() {

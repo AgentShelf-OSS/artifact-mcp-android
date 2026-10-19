@@ -4,6 +4,12 @@ import ai.agentshelf.artifactmcp.audio.AudioQueue
 import ai.agentshelf.artifactmcp.audio.ClipResolver
 import ai.agentshelf.artifactmcp.audio.HttpExecutor
 import ai.agentshelf.artifactmcp.bridge.BridgeHub
+import ai.agentshelf.artifactmcp.car.CoverDesign
+import ai.agentshelf.artifactmcp.car.CoverUris
+import ai.agentshelf.artifactmcp.car.RecentItem
+import ai.agentshelf.artifactmcp.car.RecentStore
+import ai.agentshelf.artifactmcp.library.LibraryView
+import ai.agentshelf.artifactmcp.listen.MirrorState
 import ai.agentshelf.artifactmcp.library.LibraryFetcher
 import ai.agentshelf.artifactmcp.library.LibraryRepository
 import ai.agentshelf.artifactmcp.listen.ListenController
@@ -23,6 +29,7 @@ import ai.agentshelf.artifactmcp.state.SharedPreferencesStore
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.Player
@@ -76,9 +83,69 @@ class ArtifactApp : Application() {
     lateinit var arbiter: PlaybackArbiter
         private set
     val mirrorPlayer: MirrorPlayer by lazy {
-        MirrorPlayer(Looper.getMainLooper()) { action -> listen.command(action) }.also { listen.player = it }
+        MirrorPlayer(Looper.getMainLooper()) { action -> listen.command(action) }.also { player ->
+            player.artwork = { mirror -> mirrorPresentation(mirror).first }
+            player.artifactTitle = { mirror -> mirrorPresentation(mirror).second }
+            listen.player = player
+        }
+    }
+
+    private var presentationKey: String? = null
+    private var presentation: Pair<Uri?, String?> = null to null
+
+    /**
+     * Cover and library title of the artifact Listen plays (memoized: the player asks on every
+     * state read).
+     */
+    private fun mirrorPresentation(mirror: MirrorState): Pair<Uri?, String?> {
+        val key = mirror.artifactId + "\u0000" + mirror.album
+        if (key != presentationKey) {
+            presentationKey = key
+            val title = (library.known() as? LibraryView.Ready)?.library?.find(mirror.artifactId)?.title
+                ?: recents.forOrigin(originStore.origin).firstOrNull { it.artifactId == mirror.artifactId }?.title
+            presentation = artifactCover(mirror.artifactId, title ?: mirror.album.ifBlank { mirror.title }) to title
+        }
+        return presentation
+    }
+
+    /** Cover URI of an artifact, from the library (title, category, organization color). */
+    fun artifactCover(artifactId: String, fallbackTitle: String): Uri {
+        val known = (library.known() as? LibraryView.Ready)?.library
+        val artifact = known?.find(artifactId)
+        val org = known?.orgOf(artifactId)
+        val recent = if (artifact == null) recents.forOrigin(originStore.origin).firstOrNull { it.artifactId == artifactId } else null
+        val title = artifact?.title ?: recent?.title ?: fallbackTitle.ifBlank { artifactId }
+        val category = artifact?.category ?: recent?.category.orEmpty()
+        val color = CoverDesign.orgColor(org?.org ?: recent?.org.orEmpty(), org?.color ?: recent?.color)
+        return CoverUris.uri(packageName, CoverDesign.Spec.Artifact(title, category, color))
+    }
+
+    /** Remember what Listen plays for the car's Continue tab. */
+    private fun recordRecent() {
+        val mirror = listen.mirror ?: return
+        if (mirror.phase != MirrorState.Phase.PLAYING) return
+        val origin = originStore.origin ?: return
+        val known = (library.known() as? LibraryView.Ready)?.library
+        val artifact = known?.find(mirror.artifactId)
+        val org = known?.orgOf(mirror.artifactId)
+        val previous = recents.forOrigin(origin).firstOrNull { it.artifactId == mirror.artifactId }
+        recents.record(
+            RecentItem(
+                origin = origin,
+                artifactId = mirror.artifactId,
+                title = artifact?.title ?: previous?.title ?: mirror.album.ifBlank { mirror.title },
+                org = org?.org ?: previous?.org.orEmpty(),
+                category = artifact?.category ?: previous?.category.orEmpty(),
+                color = org?.color ?: previous?.color,
+                at = System.currentTimeMillis(),
+            ),
+        )
     }
     lateinit var library: LibraryRepository
+        private set
+
+    /** Recently played artifacts, for the car's Continue tab. */
+    lateinit var recents: RecentStore
         private set
     private val activeSourceListeners = mutableListOf<(PlaybackArbiter.Source) -> Unit>()
     private var sessionController: com.google.common.util.concurrent.ListenableFuture<MediaController>? = null
@@ -125,6 +192,8 @@ class ArtifactApp : Application() {
             onActiveChanged = { source -> activeSourceListeners.toList().forEach { it(source) } },
         )
         listen.arbiter = arbiter
+        recents = RecentStore(kv)
+        listen.addListener(::recordRecent)
         library = LibraryRepository(
             cacheFile = File(filesDir, "library.json"),
             origin = { originStore.origin },
@@ -211,6 +280,8 @@ class ArtifactApp : Application() {
         hub.reset()
         listen.reset()
         library.clear()
+        recents.clear()
+        File(cacheDir, "covers").deleteRecursively()
         audio.clearCache()
         grants.clear()
         played.clear()
