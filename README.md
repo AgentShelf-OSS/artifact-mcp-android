@@ -12,7 +12,7 @@ native bridges. Phase 2 (car screens built from Car App Library templates) is no
 
 ## Status
 
-Version 0.1.0 is a pre-release. All JVM unit tests pass. The viewer (insets, geolocation, the
+Version 0.4.0 is a pre-release (release notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md)). All JVM unit tests pass. The viewer (insets, geolocation, the
 bridge handshake, the keyboard) is tested on a headless emulator; see "Emulator test". The
 foreground services, playback and Android Auto are not tested on a device yet. Treat the first
 install as a field test.
@@ -66,6 +66,7 @@ link. See "Limitations" for the options.
 | Permission | Why | When it is asked |
 | --- | --- | --- |
 | `INTERNET` | Load the viewer and speech clips. | Install time |
+| `ACCESS_NETWORK_STATE` | A car pick fails at once with "No connection" when there is no network, instead of waiting for the page. | Install time |
 | `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION` | `geo.watch` and `audio.geotrigger`. "Approximate" is accepted; geotriggers then fire only if the accuracy is within the trigger radius. | First location request from an artifact, after the in-app consent dialog |
 | `POST_NOTIFICATIONS` (Android 13+) | The persistent location notification, artifact notifications, the media notification. | With the first location or notification request |
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_LOCATION` | Location keeps working with the screen off, in a foreground service with a visible notification and a Stop button. | Install time |
@@ -122,12 +123,46 @@ without a permission (the car loads browse artwork in its own process). PNGs are
 `cache/covers` (at most 400) and removed by "Sign out and clear data". The font is under the SIL
 Open Font License ([licenses/AtkinsonHyperlegible-OFL.txt](licenses/AtkinsonHyperlegible-OFL.txt)).
 
-**Now playing.** Artwork is the artifact's cover, the title is the current section, then the
-artifact and the voice. Next to previous, play/pause and next there are two buttons: "Back 15 s"
-(`media.command` `rewind`) and "Speed" with the current rate as its icon (1x, 1.25x, 1.5x; sends
-`speed`, the page cycles and reports `media.session.rate`). They show when the page offers them:
-`rewind`/`speed` in `actions`, or any `rate` (a shell that sends `rate` handles both). For the
-native queue the app seeks back 15 s and cycles the playback speed itself.
+**Now playing.** Artwork is the artifact's cover, the title is the current chapter or section,
+then the artifact and the voice. Next to previous, play/pause and next there are up to three
+buttons: "Back 15 s" (`media.command` `rewind`), "Forward 30 s" (`forward`, ADR-0022) and "Speed"
+with the current rate as its icon (sends `speed`; the page cycles and reports
+`media.session.rate`). They show when the page offers them: `rewind`/`speed` in `actions` or any
+`rate` (a shell that sends `rate` handles both), `forward` in `actions`. With Forward shown, Speed
+moves to the overflow menu; on the Android Automotive media center only the first button fits
+next to previous, so Forward and Speed are both behind the overflow button there. For the native
+queue the app seeks back 15 s or forward 30 s and cycles the playback speed itself.
+
+**Progress and chapters (ADR-0022, `media.progress`).** A shell that knows the app has
+`media.progress` reports a position and duration (seconds, at 1x) for the current chapter or
+reading scope, a `buffering` state, a failure reason, and the chapter list (`media.chapters`).
+The car then shows a progress bar (the app interpolates the position between updates as position
++ elapsed time x rate; it cannot seek), a buffering spinner while Listen loads or reconnects, and
+a queue with one item per chapter: picking an item, or next/previous, sends `media.command`
+`chapter` with the index (previous more than 3 s into a chapter restarts it). Without chapters,
+next and previous stay the page's own `next`/`previous`. Continue shows how much is played:
+chapter index (plus the share of the current chapter) over the chapter count, or position over
+duration.
+
+**Errors.** Each failure has its own error code and message: no network ("No connection", the
+pick fails at once and opens no page), the artifact is gone (HTTP 404/410), a server error, no
+Access session ("Open the app on your phone to sign in", with an "Open on phone" resolution
+action), the page's own reason (`media.session.error`, for example "Speech is unavailable"), and
+"Listen did not start for this artifact" when the page does not start within 45 s. Play after a
+failure tries the pick again. While the device is offline, Continue starts with "No connection.
+Listening needs the internet." and every Continue and Library artifact says "Needs a
+connection". A search with no match, no library or no session gives a clear message instead of
+failing silently.
+
+**Resume.** A "play" with nothing loaded (a headset or Bluetooth button, the car's play button,
+the system's resume card) resumes the newest Continue item: it opens
+`<origin>/<id>?listen=autoplay` like a pick and the page resumes its saved place. With the app
+stopped, the media button receiver (`ResumeButtonReceiver`) starts the media service only when
+resuming can play (an origin is set, Continue has an item, the library is not signed out, a
+network is up), so a foreground service is never started without playback. Otherwise, and for
+the "recent" browse root that Android Auto asks for (`EXTRA_RECENT`, answered with the newest
+Continue item), the car gets a clear error ("Nothing to resume yet. Pick something in Library.",
+"Set up Artifact MCP on your phone first", sign in, or "No connection").
 
 **Search and voice.** Search matches artifact titles, categories and organization names in the
 cached library (case and accents ignored, every word must match, title matches first). "Play
@@ -165,19 +200,26 @@ The viewer shell detects the app through the `ArtifactNative` host object. The p
   exactly the configured origin. Only top-level pages of that origin get it. The sandboxed artifact
   iframe has an opaque origin and never gets it. `addJavascriptInterface` is not used.
 - Messages are JSON strings with `"v": 1`. Shell to app: `hello`, `geo.watch`, `geo.unwatch`,
-  `audio.queue`, `audio.geotrigger`, `audio.stop`, `notify.show`, `played.ack`, `media.session`.
-  App to shell: `ready`, `geo.position`, `geo.error`, `audio.state`, `audio.played`,
-  `media.command`, `error`. `ready.capabilities` is `geo.watch`, `audio.queue`,
-  `audio.geotrigger`, `notify`, `media.mirror`, `library`, `media.rate`.
+  `audio.queue`, `audio.geotrigger`, `audio.stop`, `notify.show`, `played.ack`, `media.session`,
+  `media.chapters`. App to shell: `ready`, `geo.position`, `geo.error`, `audio.state`,
+  `audio.played`, `media.command`, `error`. `ready.capabilities` is `geo.watch`, `audio.queue`,
+  `audio.geotrigger`, `notify`, `media.mirror`, `library`, `media.rate`, `media.progress`.
 - `media.session {artifactId, state: playing|paused|none, title, artist, album, actions, rate?}`:
   text up to 200 characters (control characters become spaces), `actions` a subset of `play`,
   `pause`, `next`, `previous`, `stop`, `rewind`, `speed`. `rate` (ADR-0021) is optional, a string
   such as `"1"`, `"1.25"`, `"0.8"`; the shell sends it only to apps with the `media.rate`
   capability. Unknown fields and actions are still rejected. `media.command {artifactId, action}`
   goes only to the page that sent the session.
+- `media.progress` (ADR-0022): `media.session` may also have `state: "buffering"`, `position` and
+  `duration` (numbers, seconds at 1x, 0 to 86400, at most one decimal), `chapterIndex` (integer
+  >= 0), `error` (1 to 120 characters, only with `paused` or `none`), and the actions `forward` and
+  `chapter` (at most 12 actions). With `none`, position, duration and chapter index are dropped.
+  `media.chapters {artifactId, chapters}`: 0 to 500 titles of 1 to 200 characters. The app sends
+  `media.command` `forward`, and `chapter` with an integer `index` (0 to 499).
 - The hidden Listen reader may only load `<origin>/<id>` and `<origin>/<id>?listen=autoplay`; all
   other navigation is blocked (a redirect to the login page shows the sign-in message in the car).
-  Its bridge accepts only `hello` and `media.session`. It is the only WebView where media may play
+  A network or HTTP error of the page itself ends the pick at once with its own error. Its bridge
+  accepts only `hello`, `media.session` and `media.chapters`. It is the only WebView where media may play
   without a tap, except the visible viewer during one `?listen=autoplay` load from the car.
 - Validation is strict: exact key sets, JSON types, `artifactId` matches `^[A-Za-z0-9_-]{1,64}$`,
   ids up to 64 characters, titles up to 120, text up to 1500, audio URLs same-origin only,
@@ -224,8 +266,10 @@ JVM unit tests (JUnit 4, Truth, Robolectric) cover protocol parsing and validati
 navigation rules, geotrigger distance and first-entry logic, persistence of played state and
 notices, consent grants and revoke, speech request construction, notification intent targets,
 and the car: cover layout (fit, ellipsis, contrast choice, palette), cover rendering and URIs, the
-browse tree and its extras, offline and signed-out entries, search, recent items, and the
-now-playing button mapping. Run them with `build/build.sh testDebugUnitTest`.
+browse tree and its extras, offline and signed-out entries, search, recent items and their played
+share, the now-playing button mapping, the `media.progress` messages (accept and reject cases),
+the mirror player's chapter queue, buffering state, interpolated position and error codes, the
+resume and search error mapping, and reader load failures. Run them with `build/build.sh testDebugUnitTest`.
 
 Not tested by the JVM tests: WebView behaviour, the foreground services, ExoPlayer and Media3 on a
 device, and Android Auto. The emulator test below covers the viewer part.
@@ -277,7 +321,14 @@ build/emulator/server.sh down && build/emulator/run.sh down
   `CarLibraryTest`, which browses the media service with the legacy `MediaBrowser` API (as Android
   Auto does) and plays the story: in the hidden reader (next, pause, play, stop) and in the visible
   viewer with the screen off. It screenshots the media notification (`listen-*-notification.png`)
-  and saves `dumpsys media_session`.
+  and saves `dumpsys media_session`. Version 0.4.0 adds: the chapter queue, progress and Forward
+  30 s on `book.html` (a small e-reader page with four chapters); playback resumption from the
+  recent root, from play with nothing loaded, and from a media button with the app stopped
+  (`cmd media_session dispatch play`); a pick with Wi-Fi and data off (fails in under 5 s, play
+  retries once back online); a missing artifact (not found); and the fake speech worker's failure
+  modes (`POST /mode` with `500`, `offline` or `slow`): the page's "Speech is unavailable" and the
+  buffering state. The progress checks need a server whose shell has `media.progress`; start a
+  fresh server before each run (the shell resumes the saved place).
 
 ### Car test (Android Automotive OS)
 
@@ -293,16 +344,26 @@ build/emulator/test-car.sh                       # screenshots in /tmp/emulator-
 administrator and publishes `car-seed.mjs`: organizations "homelab" (gallery color) and "bookclub"
 (no color) with categorized stories. `test-car.sh` installs the `automotive` APK, sets the origin
 (`CarSetup`), opens the car media center on the app and drives it with UI Automator: tabs,
-Library, an organization grid, now playing with the two buttons (speed round trip), Continue,
-search, a voice-style `playFromSearch`, offline with a cached library and signed out.
+Library, an organization grid, now playing with its buttons (speed round trip through the
+overflow menu, Forward 30 s), the chapter queue of "Rack dashboard tour" (an e-reader page:
+progress bar, queue, picking a chapter), Continue, search, a voice-style `playFromSearch`, a pick
+with no network (error state "No connection" and the marked Continue rows), offline with a
+cached library and signed out. The AAOS media center gives its control buttons no labels in the
+UI dump, so the overflow and queue rows are tapped by position on the 1408 x 792 layout.
 
 ## Limitations
 
 - No test yet in a real car or the Desktop Head Unit. The emulators cover the viewer, the media
   library through the legacy browser API, the notification, screen-off Listen playback, and the
-  car design in the Android Automotive media center (not Android Auto's own renderer).
-- Continue shows "partly played" without a percentage: `media.session` has no position or
-  section count yet.
+  car design in the Android Automotive media center (not Android Auto's own renderer). Android
+  Auto's resume card, its error screen with the "Open on phone" button, its queue view and where
+  it places the third custom button are not tested.
+- Legacy controllers (Android Auto) get distinct error messages, but the legacy error codes are
+  coarse: only "sign in" has its own code (`AUTHENTICATION_EXPIRED`); network, not found, server
+  and page errors arrive as `UNKNOWN_ERROR` with their message. Media3 controllers get the full
+  codes.
+- Continue shows "partly played" without a percentage for pages whose shell has no
+  `media.progress`.
 - Phase 2 car surfaces (Car App Library templates) are not built.
 - Google sign-in through Cloudflare Access cannot work in the WebView. Use the email one-time PIN.
   Alternatives for later: an Access service token or a dedicated Access application for the app.

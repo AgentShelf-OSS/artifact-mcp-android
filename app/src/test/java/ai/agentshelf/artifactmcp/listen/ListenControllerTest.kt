@@ -63,9 +63,11 @@ class ListenControllerTest {
     private val actives = mutableListOf<PlaybackArbiter.Source>()
     private lateinit var listen: ListenController
     private lateinit var arbiter: PlaybackArbiter
+    private var online = true
+    private var now = 5_000L
 
     @Before fun setUp() {
-        listen = ListenController({ origin }, timers, { FakeReader().also { readers += it } }, { bound++ })
+        listen = ListenController({ origin }, timers, { FakeReader().also { readers += it } }, { bound++ }, { online }, { now })
         arbiter = PlaybackArbiter({ nativePaused++ }, { listen.pauseForNative() }, { actives += it })
         listen.arbiter = arbiter
     }
@@ -289,5 +291,163 @@ class ListenControllerTest {
         listen.reset()
         assertThat(readers.single().destroyed).isTrue()
         assertThat(listen.mirror).isNull()
+    }
+
+    // ---- ADR-0022: progress, chapters, buffering, errors ------------------------------------
+
+    private fun progressSession(
+        state: MediaState,
+        chapterIndex: Int? = null,
+        position: Double? = null,
+        duration: Double? = null,
+        error: String? = null,
+        artifactId: String = "book",
+    ) = Inbound.MediaSession(
+        artifactId, state, "Ch 1", "Ava", "Book",
+        if (state == MediaState.NONE) emptySet() else MediaAction.entries.toSet(),
+        rate = if (state == MediaState.NONE) null else "1",
+        position = position, duration = duration, chapterIndex = chapterIndex, error = error,
+    )
+
+    private fun Page.lastCommand() = (Protocol.parseJson(sent.last()) as JsonObject)
+
+    @Test fun `buffering takes over like playing and shows buffering`() {
+        val page = Page("book", Any())
+        listen.onMediaSession(progressSession(MediaState.BUFFERING), page)
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.BUFFERING)
+        assertThat(listen.isPlaying).isTrue()
+        assertThat(actives.last()).isEqualTo(PlaybackArbiter.Source.MIRROR)
+        listen.command(MediaAction.PAUSE)
+        assertThat(page.commands()).containsExactly("pause")
+        listen.onMediaSession(progressSession(MediaState.PLAYING, position = 3.0, duration = 60.0), page)
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.PLAYING)
+        assertThat(listen.mirror?.positionS).isEqualTo(3.0)
+        assertThat(listen.mirror?.durationS).isEqualTo(60.0)
+        assertThat(listen.mirror?.positionAtMs).isEqualTo(5_000L)
+    }
+
+    @Test fun `chapters from the page reach the mirror, before or after its session`() {
+        val host = Any()
+        val page = Page("book", host)
+        listen.onMediaChapters(Inbound.MediaChapters("book", listOf("One", "Two", "Three")), page)
+        listen.onMediaSession(progressSession(MediaState.PLAYING, chapterIndex = 1), page)
+        assertThat(listen.mirror?.chapters).containsExactly("One", "Two", "Three").inOrder()
+        assertThat(listen.mirror?.hasChapterQueue).isTrue()
+        listen.onMediaChapters(Inbound.MediaChapters("book", listOf("A", "B")), page)
+        assertThat(listen.mirror?.chapters).containsExactly("A", "B").inOrder()
+        // Another page's chapters do not change this mirror.
+        listen.onMediaChapters(Inbound.MediaChapters("other", listOf("X")), Page("other", Any()))
+        assertThat(listen.mirror?.chapters).containsExactly("A", "B").inOrder()
+        // Chapters of a different artifact on the same page are not applied.
+        listen.onMediaChapters(Inbound.MediaChapters("book2", listOf("Z")), page)
+        assertThat(listen.mirror?.chapters).containsExactly("A", "B").inOrder()
+    }
+
+    @Test fun `chapter picks send the chapter command and show the pick at once`() {
+        val page = Page("book", Any())
+        listen.onMediaChapters(Inbound.MediaChapters("book", listOf("One", "Two", "Three")), page)
+        listen.onMediaSession(progressSession(MediaState.PLAYING, chapterIndex = 0, position = 40.0, duration = 90.0), page)
+        now = 9_000L
+        listen.chapter(2)
+        val command = page.lastCommand()
+        assertThat((command["action"] as JsonPrimitive).content).isEqualTo("chapter")
+        assertThat((command["index"] as JsonPrimitive).content).isEqualTo("2")
+        assertThat(listen.mirror?.chapterIndex).isEqualTo(2)
+        assertThat(listen.mirror?.title).isEqualTo("Three")
+        assertThat(listen.mirror?.positionS).isEqualTo(0.0)
+        assertThat(listen.mirror?.positionAtMs).isEqualTo(9_000L)
+        // Out of range or not offered: nothing is sent.
+        val before = page.sent.size
+        listen.chapter(3)
+        listen.chapter(-1)
+        listen.command(MediaAction.CHAPTER)
+        assertThat(page.sent).hasSize(before)
+        listen.onMediaSession(progressSession(MediaState.PLAYING, chapterIndex = 0).copy(actions = setOf(MediaAction.PAUSE)), page)
+        listen.chapter(1)
+        assertThat(page.sent).hasSize(before)
+    }
+
+    @Test fun `forward goes to a page that offers it`() {
+        val page = Page("book", Any())
+        listen.onMediaSession(progressSession(MediaState.PLAYING), page)
+        listen.command(MediaAction.FORWARD)
+        assertThat(page.commands()).containsExactly("forward")
+        listen.onMediaSession(session(MediaState.PLAYING).copy(actions = setOf(MediaAction.PAUSE)), page)
+        listen.command(MediaAction.FORWARD)
+        assertThat(page.commands()).containsExactly("forward")
+    }
+
+    @Test fun `offline pick fails at once with no connection and opens nothing`() {
+        online = false
+        assertThat(listen.playFromLibrary("book", "Frankenstein")).isTrue()
+        assertThat(readers).isEmpty()
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.FAILED)
+        assertThat(listen.mirror?.failure).isEqualTo(MirrorState.Failure.OFFLINE)
+        assertThat(listen.mirror?.error).isEqualTo(ListenController.MESSAGE_OFFLINE)
+        assertThat(timers.pending).doesNotContainKey("loading")
+        assertThat(bound).isEqualTo(1)
+        // Play retries; back online it opens the reader.
+        online = true
+        listen.command(MediaAction.PLAY)
+        assertThat(readers.single().loaded.single()).endsWith("/book?listen=autoplay")
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.LOADING)
+    }
+
+    @Test fun `reader load failures map to distinct errors`() {
+        for ((failure, message) in listOf(
+            MirrorState.Failure.OFFLINE to ListenController.MESSAGE_OFFLINE,
+            MirrorState.Failure.NOT_FOUND to ListenController.MESSAGE_NOT_FOUND,
+            MirrorState.Failure.SERVER to ListenController.MESSAGE_SERVER,
+            MirrorState.Failure.SIGN_IN to ListenController.MESSAGE_SIGN_IN,
+        )) {
+            listen.reset()
+            assertThat(listen.playFromLibrary("book", "Frankenstein")).isTrue()
+            listen.onReaderFailed(failure)
+            assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.FAILED)
+            assertThat(listen.mirror?.failure).isEqualTo(failure)
+            assertThat(listen.mirror?.error).isEqualTo(message)
+            assertThat(readers.last().destroyed).isTrue()
+            assertThat(timers.pending).doesNotContainKey("loading")
+        }
+    }
+
+    @Test fun `a page error ends Listen with the page's message`() {
+        assertThat(listen.playFromLibrary("book", "Frankenstein")).isTrue()
+        val reader = readers.single()
+        val page = Page("book", reader.host)
+        listen.onMediaSession(progressSession(MediaState.NONE, error = "Speech is unavailable"), page)
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.FAILED)
+        assertThat(listen.mirror?.failure).isEqualTo(MirrorState.Failure.PAGE)
+        assertThat(listen.mirror?.error).isEqualTo("Speech is unavailable")
+    }
+
+    @Test fun `a paused page with an error keeps the session and shows the error`() {
+        assertThat(listen.playFromLibrary("book", "Frankenstein")).isTrue()
+        val page = Page("book", readers.single().host)
+        listen.onMediaSession(progressSession(MediaState.PAUSED, error = "No connection"), page)
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.PAUSED)
+        assertThat(listen.mirror?.error).isEqualTo("No connection")
+        assertThat(timers.pending).doesNotContainKey("loading")
+        listen.command(MediaAction.PLAY)
+        assertThat(page.commands()).containsExactly("play")
+    }
+
+    @Test fun `a failure for one artifact is not hidden by another page pausing`() {
+        val viewer = Page("other", Any())
+        listen.onMediaSession(session(MediaState.PLAYING, artifactId = "other"), viewer)
+        online = false
+        listen.playFromLibrary("book", "Frankenstein")
+        assertThat(viewer.commands()).containsExactly("pause")
+        listen.onMediaSession(session(MediaState.PAUSED, artifactId = "other"), viewer)
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.FAILED)
+        assertThat(listen.mirror?.artifactId).isEqualTo("book")
+        // A page of the failed artifact may take over.
+        listen.onMediaSession(session(MediaState.PAUSED), Page("book", Any()))
+        assertThat(listen.mirror?.phase).isEqualTo(MirrorState.Phase.PAUSED)
+    }
+
+    @Test fun `failure messages are distinct`() {
+        val messages = MirrorState.Failure.entries.filter { it != MirrorState.Failure.PAGE }.map { ListenController.message(it) }
+        assertThat(messages.toSet()).hasSize(messages.size)
     }
 }

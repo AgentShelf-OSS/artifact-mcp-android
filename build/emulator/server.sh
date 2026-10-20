@@ -13,6 +13,7 @@
 #
 # Listen speech: fake-tts.mjs on 127.0.0.1:3490 stands in for the Kokoro speech worker (a quiet
 # tone per request), so the viewer's Listen player and the Android media mirror can be tested.
+# Its failure modes (500, offline, slow; see fake-tts.mjs) drive the car error and buffering tests.
 #
 # Writes the published artifact ids to /tmp/emulator-test/artifacts.env.
 #
@@ -41,6 +42,10 @@ case "$cmd" in
     [ -f "$PLANNER" ] || { echo "planner HTML missing: $PLANNER (run python3 build.py in planner/)" >&2; exit 2; }
     mkdir -p "$OUT"
     rev=$(git -C "$SRC" rev-parse --short HEAD)
+    # A checkout with uncommitted changes (for example a shell change tested against the app
+    # before it is committed) gets its own image tag, so a cached image of HEAD is not reused.
+    dirty=$( (git -C "$SRC" diff HEAD; git -C "$SRC" ls-files --others --exclude-standard | sort | xargs -r -I{} sh -c 'cat "$1/{}"' _ "$SRC") 2>/dev/null | sha256sum | cut -c1-8)
+    [ -z "$(git -C "$SRC" status --porcelain 2>/dev/null)" ] || rev="$rev-dirty-$dirty"
     image="artifact-mcp-emu-dev:$rev"
     docker image inspect "$image" > /dev/null 2>&1 || docker build -q -t "$image" "$SRC" > /dev/null
     # A throwaway publish key for this run only; never printed.
@@ -80,10 +85,12 @@ case "$cmd" in
     cp "$PLANNER" "$OUT/planner.html"
     cp "$HERE/geo-probe.html" "$OUT/geo-probe.html"
     cp "$HERE/story.html" "$OUT/story.html"
+    cp "$HERE/book.html" "$OUT/book.html"
     docker run --rm --network host -v "$HERE":/harness:ro -v "$OUT":/out:ro \
       -e MCP_URL=http://127.0.0.1:$SERVER_PORT/mcp -e MCP_KEY="$key" -w /out \
       "$image" node /harness/publish.mjs "geo-probe.html:emu/geo-probe:Geo probe" \
-      "planner.html:emu/road-trip-planner:Road trip planner" "story.html:emu/listen-story:Listen story" > "$OUT/published.txt"
+      "planner.html:emu/road-trip-planner:Road trip planner" "story.html:emu/listen-story:Listen story" \
+      "book.html:emu/chapter-book:Chapter book" > "$OUT/published.txt"
     if [ "${CAR_SEED:-0}" = 1 ]; then
       docker run --rm --network host -v "$HERE":/harness:ro \
         -e MCP_URL=http://127.0.0.1:$SERVER_PORT/mcp -e PROXY=http://127.0.0.1:$PROXY_PORT -e PUBLIC_ORIGIN=http://localhost:$PROXY_PORT \
@@ -94,6 +101,7 @@ case "$cmd" in
       echo "PROBE_ID=$(awk '$1=="emu/geo-probe"{print $2}' "$OUT/published.txt")"
       echo "PLANNER_ID=$(awk '$1=="emu/road-trip-planner"{print $2}' "$OUT/published.txt")"
       echo "STORY_ID=$(awk '$1=="emu/listen-story"{print $2}' "$OUT/published.txt")"
+      echo "BOOK_ID=$(awk '$1=="emu/chapter-book"{print $2}' "$OUT/published.txt")"
       echo "ORIGIN=http://localhost:$PROXY_PORT"
     } > "$OUT/artifacts.env"
     cat "$OUT/artifacts.env"

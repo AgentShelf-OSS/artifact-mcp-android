@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Listen in the car fails fast without a network instead of waiting for the page. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- While-in-use location only. The location service is started from the visible viewer,
          so ACCESS_BACKGROUND_LOCATION is not needed (see README, "Permissions"). -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -90,6 +92,18 @@
             </intent-filter>
         </service>
 
+        <!-- Playback resumption: "play" from a headset, Bluetooth or the car while the app is not
+             running resumes the newest Continue item. Exported because the system delivers
+             MEDIA_BUTTON broadcasts; it only starts PlaybackService, and only when resumption can
+             play (ResumeButtonReceiver.shouldStartForegroundService). -->
+        <receiver
+            android:name=".audio.ResumeButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
         <!-- Car artwork (covers). Exported without a permission on purpose: read-only, and each
              cover is drawn only from the text in its own URI, so it exposes no app data. Android
              Auto and the car media center load browse artwork through their own resolver. -->
@@ -104,7 +118,8 @@
             android:exported="false" />
 
         <!-- Not needed for a sideloaded app (it serves adb/benchmark profile installs); removing
-             it keeps the exported surface to the launcher activity and the media service, plus
+             it keeps the exported surface to the launcher activity, the media service and its media
+             button receiver, plus
              Media3's BluetoothValidationActivity, which only the system Bluetooth stack
              (BLUETOOTH_PRIVILEGED) can start. -->
         <receiver

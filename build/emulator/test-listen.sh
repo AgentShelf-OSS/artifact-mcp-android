@@ -9,6 +9,10 @@
 # Drives the app's media library service through the legacy MediaBrowser API (the path Android
 # Auto uses) from an instrumentation test, and takes screenshots of the media notification.
 # Needs Node 22+ on the Docker host. Evidence: /tmp/emulator-test/listen-*.
+#
+# Start a fresh server (server.sh up) before each run: shells with cross-device Listen places
+# resume the story where the last run stopped, which can end it before the pause checks. The
+# chapter, buffering and speech-error checks need a server whose shell has `media.progress`.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

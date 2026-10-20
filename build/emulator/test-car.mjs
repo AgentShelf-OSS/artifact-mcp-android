@@ -1,6 +1,8 @@
 // Android Automotive OS (AAOS) test of the car design: the car media center renders the app's
 // browse tree, covers, now-playing buttons and search from the media service. Run through
 // test-car.sh. Every check prints PASS or FAIL; the exit code is the number of failures.
+// Version 0.4.0 adds: Forward 30 s, the chapter queue (needs a shell with `media.progress`), and a
+// pick without a network that fails at once with "No connection".
 // Screenshots: $OUT/car/car-*.png (the main display only).
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -120,6 +122,32 @@ async function openMedia() {
   await waitFor(byText("Library"), 30_000);
   await sleep(1500);
 }
+// A now-playing action by label: on screen, or in the overflow menu (AAOS shows one custom action
+// left of "previous" and moves the rest behind the overflow button when there are more than two).
+// The AAOS 15 media center gives its control buttons no labels in the UI dump, so the
+// positions on the 1408x792 layout are used: overflow at the right end of the control bar, and
+// the overflow row above it in button order (Forward 30 s, then Speed).
+const OVERFLOW = { x: 1166, y: 620 };
+const OVERFLOW_ITEMS = { "Forward 30": { x: 588, y: 492 }, Speed: { x: 820, y: 492 } };
+async function tapAction(prefix, shotName) {
+  const match = (n) => n.desc.startsWith(prefix) || n.text.startsWith(prefix);
+  let node = await waitFor(match, 2_000);
+  if (!node) {
+    sh(`input tap ${OVERFLOW.x} ${OVERFLOW.y}`);
+    await sleep(2000);
+    if (shotName) shot(shotName);
+    node = dump().find(match) || OVERFLOW_ITEMS[prefix];
+  }
+  if (!node) return false;
+  sh(`input tap ${node.x} ${node.y}`);
+  await sleep(1500);
+  // The overflow row stays open (and dims the screen) until the overflow button is tapped again.
+  if (node === OVERFLOW_ITEMS[prefix]) {
+    sh(`input tap ${OVERFLOW.x} ${OVERFLOW.y}`);
+    await sleep(1500);
+  }
+  return true;
+}
 async function back() {
   await tap((n) => n.id === "car_ui_toolbar_nav_icon_container", "back");
 }
@@ -168,14 +196,14 @@ record("now playing: section title above the artifact title", /description=(?!Ra
 await sleep(2500);
 shot("car-04-now-playing");
 
-const speed = (await waitFor((n) => n.desc.startsWith("Speed"), 5_000)) || null;
-if (speed) {
-  sh(`input tap ${speed.x} ${speed.y}`);
-} else {
-  sh("input tap 1166 620"); // the last control slot on the 1408x792 layout
+let speedTapped = await tapAction("Speed", "car-05a-overflow");
+s = await waitSession(/mName='Speed 1\.25×/, 10_000);
+if (!/mName='Speed 1\.25×/.test(s)) {
+  // The overflow row animates in; one more try if the first tap landed before it was drawn.
+  speedTapped = await tapAction("Speed", "car-05b-overflow-retry");
+  s = await waitSession(/mName='Speed 1\.25×/, 10_000);
 }
-s = await waitSession(/mName='Speed 1\.25×/, 20_000);
-record("now playing: Speed cycles to 1.25x (media.command speed, media.session rate)", /mName='Speed 1\.25×/.test(s));
+record("now playing: Speed cycles to 1.25x (media.command speed, media.session rate)", /mName='Speed 1\.25×/.test(s), speedTapped ? "from the overflow or the bar" : "Speed not found");
 await sleep(2000);
 shot("car-05-now-playing-speed");
 
@@ -183,6 +211,42 @@ const rewind = await waitFor((n) => n.desc.startsWith("Back 15"), 5_000);
 if (rewind) sh(`input tap ${rewind.x} ${rewind.y}`); else sh("input tap 241 620");
 await sleep(2000);
 record("now playing: Back 15 s keeps Listen playing", /state=PLAYING\(3\)/.test(session()));
+
+// ---- 0.4.0: Forward 30 s and the chapter queue ---------------------------------------------
+
+s = await waitSession(/mName='Forward 30 s/, 20_000);
+record("now playing: Forward 30 s button (media.progress)", /mName='Forward 30 s/.test(s), (s.match(/custom actions=\[[^\n]*/) || [""])[0].slice(0, 300));
+s = await waitSession(/queueTitle=[^\n]*size=[2-9]/, 30_000);
+const queueSize = Number((s.match(/queueTitle=[^\n]*size=(\d+)/) || [0, 0])[1]);
+record("now playing: one queue item per chapter", queueSize >= 3, `queue size ${queueSize}`);
+// The queue button is the icon at the top right of now playing.
+const queueButton = (await waitFor((n) => /queue|playlist/i.test(n.desc) || /queue/i.test(n.id), 5_000)) || { x: 1290, y: 125 };
+{
+  sh(`input tap ${queueButton.x} ${queueButton.y}`);
+  await sleep(2500);
+  shot("car-10-queue");
+  const before = (session().match(/description=([^,\n]*)/) || [])[1] || "";
+  // Pick a chapter that is not the current one.
+  const wanted = before.endsWith("The switch") ? "The quiet fans" : "The switch";
+  // The queue rows are not always in the UI dump: fall back to their positions (rows at y 230,
+  // 346 and 462 on the 1408x792 layout, in chapter order).
+  const row = (await waitFor((n) => n.text.endsWith(wanted), 5_000)) || { x: 460, y: wanted === "The switch" ? 230 : 462 };
+  if (row) {
+    sh(`input tap ${row.x} ${row.y}`);
+    const re = new RegExp(`description=[^,\\n]*${wanted}`);
+    s = await waitSession(re, 30_000);
+    shot("car-10b-queue-picked");
+    record("queue: picking a chapter jumps to it (media.command chapter)", re.test(s), `${before} -> ${(s.match(/description=([^,\n]*)/) || [])[1]}`);
+  } else {
+    record("queue: picking a chapter jumps to it (media.command chapter)", false, `chapter row '${wanted}' not on screen`);
+  }
+  sh("input keyevent KEYCODE_BACK", { check: false });
+  await sleep(1500);
+}
+await waitFor(byText("Now Playing"), 5_000);
+const forwardTapped = await tapAction("Forward 30");
+await sleep(2500);
+record("now playing: Forward 30 s (bar or overflow) keeps Listen playing", forwardTapped && /state=PLAYING\(3\)/.test(session()), forwardTapped ? "" : "Forward 30 s not found");
 
 // A second artifact for Continue, then pause.
 await back(); // collapse now playing
@@ -217,6 +281,26 @@ record("voice: playFromSearch plays the best match", /OK \(1 test\)/.test(voice)
 sh("input keyevent KEYCODE_MEDIA_PAUSE", { check: false });
 
 // ---- offline and signed out -----------------------------------------------------------------
+
+// No network: a pick fails at once with "No connection" (no 45 s spinner).
+sh("svc wifi disable", { check: false });
+sh("svc data disable", { check: false });
+await sleep(4000);
+await openMedia();
+await tapText("Continue");
+record("offline: Continue marks the rows", !!(await waitFor((n) => n.text === "Needs a connection", 15_000)), "subtitle 'Needs a connection'");
+shot("car-11-offline-continue");
+await tapTile("Rack dashboard tour");
+const offlineStart = Date.now();
+const offlineState = await waitSession(/state=ERROR\(7\)[^\n]*No connection/, 10_000);
+const offlineMs = Date.now() - offlineStart;
+record("offline pick: error state 'No connection' within 10 s", /state=ERROR\(7\)[^\n]*No connection/.test(offlineState), `${offlineMs} ms; ${(offlineState.match(/state=[^\n]*/) || [""])[0].slice(0, 200)}`);
+await sleep(2000);
+shot("car-12-offline-pick");
+sh("svc wifi enable", { check: false });
+sh("svc data enable", { check: false });
+await sleep(4000);
+sh("input keyevent KEYCODE_MEDIA_STOP", { check: false });
 
 adb(["reverse", "--remove", `tcp:${PORT}`], { check: false });
 await openMedia();

@@ -56,9 +56,13 @@ object LibraryTree {
     const val STALE = "stale"
     const val EMPTY = "empty"
     const val CONTINUE_EMPTY = "continue-empty"
+    const val NO_CONNECTION = "no-connection"
+
+    /** Browse root of a "recent" request (EXTRA_RECENT): its one child is the newest Continue item. */
+    const val RECENT = "recent"
 
     /** Ids of the message entries (sign in, offline, empty states). */
-    val MESSAGES = setOf(SIGN_IN, OFFLINE, STALE, EMPTY, CONTINUE_EMPTY)
+    val MESSAGES = setOf(SIGN_IN, OFFLINE, STALE, EMPTY, CONTINUE_EMPTY, NO_CONNECTION)
     private const val ORG_PREFIX = "org:"
     private const val ARTIFACT_PREFIX = "art:"
 
@@ -80,6 +84,10 @@ object LibraryTree {
         val offline: String,
         val empty: String,
         val other: String,
+        /** Subtitle of playable rows while the device is offline. */
+        val needsConnection: String = "Needs a connection",
+        /** First Continue row while the device is offline. */
+        val noConnection: String = "No connection. Listening needs the internet.",
     )
 
     fun orgId(org: String) = ORG_PREFIX + org
@@ -150,13 +158,18 @@ object LibraryTree {
 
     // ---- Continue ------------------------------------------------------------------------------
 
-    fun continueChildren(recents: List<RecentItem>, strings: Strings): List<BrowseNode> {
+    /**
+     * Continue: recent artifacts with their played share. [offline] marks every row (and adds a
+     * message first): picking one fails at once without a network.
+     */
+    fun continueChildren(recents: List<RecentItem>, strings: Strings, offline: Boolean = false): List<BrowseNode> {
         if (recents.isEmpty()) return listOf(message(CONTINUE_EMPTY, strings.continueEmpty))
-        return recents.map { r ->
+        val notice = if (offline) listOf(message(NO_CONNECTION, strings.noConnection)) else emptyList()
+        return notice + recents.map { r ->
             BrowseNode(
                 id = artifactMediaId(r.artifactId),
                 title = shortTitle(r.title),
-                subtitle = r.category.ifBlank { null },
+                subtitle = if (offline) strings.needsConnection else r.category.ifBlank { null },
                 browsable = false,
                 playable = true,
                 artwork = Artwork.Cover(CoverDesign.Spec.Artifact(r.title, r.category, CoverDesign.orgColor(r.org, r.color))),
@@ -178,6 +191,10 @@ object LibraryTree {
         artwork = Artwork.Cover(CoverDesign.Spec.Org(org.org, CoverDesign.orgColor(org.org, org.color))),
         style = FolderStyle(ChildStyle.GRID, ChildStyle.GRID),
     )
+
+    /** The one child of the [RECENT] root: the newest Continue item, or nothing. */
+    fun recentChildren(recents: List<RecentItem>, strings: Strings): List<BrowseNode> =
+        recents.take(1).let { continueChildren(it, strings).filter { node -> node.playable } }
 
     /** Children of the Library tab for each library state. */
     fun libraryChildren(view: LibraryView, strings: Strings): List<BrowseNode> = when (view) {
@@ -209,7 +226,7 @@ object LibraryTree {
      * group heading carries the category, so the items have no subtitle. Null when the folder
      * is unknown.
      */
-    fun orgChildren(view: LibraryView, orgMediaId: String, strings: Strings): List<BrowseNode>? {
+    fun orgChildren(view: LibraryView, orgMediaId: String, strings: Strings, offline: Boolean = false): List<BrowseNode>? {
         val name = parseOrgId(orgMediaId) ?: return null
         val library = (view as? LibraryView.Ready)?.library ?: return emptyList()
         val org = library.org(name) ?: return null
@@ -219,7 +236,7 @@ object LibraryTree {
         val ordered = groups.entries.sortedBy { if (it.key.isEmpty()) 1 else 0 }
         return ordered.flatMap { (category, items) ->
             val heading = category.ifEmpty { strings.other }
-            items.map { artifactNode(it, org, groupTitle = heading) }
+            items.map { artifactNode(it, org, groupTitle = heading, subtitle = if (offline) strings.needsConnection else null) }
         }
     }
 

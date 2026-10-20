@@ -24,9 +24,12 @@ interface ShellConnection {
     fun post(message: String)
 }
 
-/** Receives the viewer's Listen state (`media.session`) for the native media session. */
+/** Receives the viewer's Listen state (`media.session`, `media.chapters`) for the native media session. */
 fun interface MediaSessionSink {
     fun onMediaSession(message: Protocol.Inbound.MediaSession, connection: ShellConnection)
+
+    /** The page's chapter list (ADR-0022). */
+    fun onMediaChapters(message: Protocol.Inbound.MediaChapters, connection: ShellConnection) {}
 }
 
 /** Asks the user (native dialog and OS runtime permissions) before a capability is used. */
@@ -124,7 +127,7 @@ class BridgeHub(
      * Handle one message from a viewer page.
      *
      * [reader] is true for the hidden Listen reader that the media service opens for the car
-     * library (ADR-0019). A reader page may only say `hello` and report `media.session`; every
+     * library (ADR-0019). A reader page may only say `hello` and report `media.session` and `media.chapters`; every
      * other capability is denied, it does not become the page that native events go to, and
      * its `hello` does not consume notices or played events meant for the visible viewer.
      */
@@ -143,6 +146,11 @@ class BridgeHub(
             Inbound.Hello -> connection.post(Protocol.ready(appVersion))
             is Inbound.MediaSession -> if (message.artifactId == connection.pageArtifactId) {
                 media.onMediaSession(message, connection)
+            } else {
+                connection.post(Protocol.error(message.artifactId, null, Reason.DENIED))
+            }
+            is Inbound.MediaChapters -> if (message.artifactId == connection.pageArtifactId) {
+                media.onMediaChapters(message, connection)
             } else {
                 connection.post(Protocol.error(message.artifactId, null, Reason.DENIED))
             }
@@ -172,6 +180,7 @@ class BridgeHub(
             is Inbound.NotifyShow -> notify(message, connection)
             is Inbound.PlayedAck -> played.acknowledge(message.artifactId, message.ids)
             is Inbound.MediaSession -> media.onMediaSession(message, connection)
+            is Inbound.MediaChapters -> media.onMediaChapters(message, connection)
         }
     }
 

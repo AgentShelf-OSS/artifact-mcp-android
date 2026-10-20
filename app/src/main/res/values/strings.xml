@@ -76,5 +76,13 @@
     <string name="car_queue">Now queued</string>
     <string name="car_triggers">Geotrigger stops</string>
     <string name="car_rewind">Back 15 s</string>
+    <string name="car_forward">Forward 30 s</string>
+    <string name="car_sign_in_action">Open on phone</string>
+    <string name="car_needs_connection">Needs a connection</string>
+    <string name="car_no_connection">No connection. Listening needs the internet.</string>
+    <string name="car_nothing_to_resume">Nothing to resume yet. Pick something in Library.</string>
+    <string name="car_set_up_first">Set up Artifact MCP on your phone first</string>
+    <string name="car_no_match">Nothing in your library matches \"%1$s\"</string>
+    <string name="car_library_unavailable">Can\'t reach your library right now</string>
     <string name="car_speed">Speed %1$s</string>
 </resources>

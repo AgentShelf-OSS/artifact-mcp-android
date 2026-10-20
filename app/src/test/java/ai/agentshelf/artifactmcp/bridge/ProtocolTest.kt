@@ -204,14 +204,14 @@ class ProtocolTest {
 
     @Test fun `media session rejects unknown fields, states and actions`() {
         invalid(session.replace("\"actions\"", "\"extra\":1,\"actions\""))
-        invalid(session.replace("\"playing\"", "\"buffering\""))
+        invalid(session.replace("\"playing\"", "\"loading\""))
         invalid(session.replace("\"stop\"]", "\"seek\"]"))
         invalid(session.replace("\"stop\"]", "1]"))
         invalid(session.replace("\"title\":\"Chapter 1\"", "\"title\":5"))
         invalid(session.replace("\"title\":\"Chapter 1\"", "\"title\":\"${"x".repeat(201)}\""))
         invalid(session.replace("\"artifactId\":\"book\"", "\"artifactId\":\"bad id\""))
         invalid("""{"v":1,"type":"media.session","artifactId":"book"}""")
-        val error = invalid(session.replace("\"stop\"]", "\"stop\",\"play\",\"play\",\"play\",\"play\"]"))
+        val error = invalid(session.replace("\"stop\"]", "\"stop\"" + ",\"play\"".repeat(8) + "]"))
         assertThat(error.reason).isEqualTo(Protocol.Reason.LIMIT)
     }
 
@@ -232,7 +232,7 @@ class ProtocolTest {
         for (rate in listOf("\"fast\"", "1.25", "\"\"", "\"-1\"", "\"1.\"", "\".5\"", "\"01\"", "\"100\"", "\"1.255\"", "\"1e2\"", "\" 1\"")) {
             invalid(session.replace("]}", "],\"rate\":$rate}"))
         }
-        invalid(session.replace("\"stop\"]", "\"stop\",\"forward\"]"))
+        invalid(session.replace("\"stop\"]", "\"stop\",\"seek\"]"))
         invalid(session.replace("\"stop\"]", "\"stop\",\"Rewind\"]"))
     }
 
@@ -249,7 +249,8 @@ class ProtocolTest {
         assertThat((o["type"] as JsonPrimitive).content).isEqualTo("media.command")
         assertThat((o["artifactId"] as JsonPrimitive).content).isEqualTo("book")
         assertThat((o["action"] as JsonPrimitive).content).isEqualTo("pause")
-        assertThat(Protocol.MediaAction.entries.map { it.wire }).containsExactly("play", "pause", "next", "previous", "stop", "rewind", "speed")
+        assertThat(Protocol.MediaAction.entries.map { it.wire })
+            .containsExactly("play", "pause", "next", "previous", "stop", "rewind", "speed", "forward", "chapter")
         val rewind = Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.REWIND)) as JsonObject
         assertThat((rewind["action"] as JsonPrimitive).content).isEqualTo("rewind")
         val speed = Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.SPEED)) as JsonObject
@@ -262,7 +263,119 @@ class ProtocolTest {
         assertThat((o["type"] as JsonPrimitive).content).isEqualTo("ready")
         assertThat((o["app"] as JsonPrimitive).content).isEqualTo("0.1.0")
         assertThat((o["capabilities"] as JsonArray).map { (it as JsonPrimitive).content })
-            .containsExactly("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library", "media.rate").inOrder()
+            .containsExactly("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library", "media.rate", "media.progress").inOrder()
+    }
+
+    // ---- media.progress (ADR-0022) ---------------------------------------------------------
+
+    private fun progress(extra: String, state: String = "playing") =
+        session.replace("\"playing\"", "\"$state\"").replace("]}", "]$extra}")
+
+    @Test fun `media session accepts buffering and the progress fields`() {
+        val m = ok(progress(",\"position\":12.5,\"duration\":300,\"chapterIndex\":3", state = "buffering")) as Inbound.MediaSession
+        assertThat(m.state).isEqualTo(Protocol.MediaState.BUFFERING)
+        assertThat(m.position).isEqualTo(12.5)
+        assertThat(m.duration).isEqualTo(300.0)
+        assertThat(m.chapterIndex).isEqualTo(3)
+        assertThat(m.error).isNull()
+        val bare = ok(session) as Inbound.MediaSession
+        assertThat(listOf(bare.position, bare.duration, bare.chapterIndex, bare.error)).containsExactly(null, null, null, null)
+        // Bounds: 0 and 86400 seconds, chapter 0, one decimal.
+        val edge = ok(progress(",\"position\":0,\"duration\":86400,\"chapterIndex\":0")) as Inbound.MediaSession
+        assertThat(edge.position).isEqualTo(0.0)
+        assertThat(edge.duration).isEqualTo(86400.0)
+        assertThat(edge.chapterIndex).isEqualTo(0)
+        assertThat((ok(progress(",\"position\":0.1")) as Inbound.MediaSession).position).isEqualTo(0.1)
+        assertThat((ok(progress(",\"position\":86399.9")) as Inbound.MediaSession).position).isEqualTo(86399.9)
+    }
+
+    @Test fun `media session rejects malformed progress fields`() {
+        for (bad in listOf(
+            ",\"position\":-1", ",\"position\":86400.1", ",\"position\":1.25", ",\"position\":\"5\"", ",\"position\":true",
+            ",\"position\":null", ",\"position\":[1]",
+            ",\"duration\":-0.5", ",\"duration\":90000", ",\"duration\":0.05", ",\"duration\":\"300\"",
+            ",\"chapterIndex\":-1", ",\"chapterIndex\":1.5", ",\"chapterIndex\":\"2\"", ",\"chapterIndex\":true", ",\"chapterIndex\":null",
+            ",\"progress\":1",
+        )) {
+            invalid(progress(bad))
+        }
+    }
+
+    @Test fun `media session error comes only with paused or none and is 1 to 120 characters`() {
+        val paused = ok(progress(",\"error\":\"Speech is unavailable\"", state = "paused")) as Inbound.MediaSession
+        assertThat(paused.error).isEqualTo("Speech is unavailable")
+        val none = ok("""{"v":1,"type":"media.session","artifactId":"book","state":"none","title":"","artist":"","album":"","actions":[],"error":"No connection"}""") as Inbound.MediaSession
+        assertThat(none.error).isEqualTo("No connection")
+        assertThat((ok(progress(",\"error\":\"${"e".repeat(120)}\"", state = "paused")) as Inbound.MediaSession).error).hasLength(120)
+        assertThat((ok(progress(",\"error\":\"a\\u0007b\"", state = "paused")) as Inbound.MediaSession).error).isEqualTo("a b")
+        invalid(progress(",\"error\":\"Speech is unavailable\""))
+        invalid(progress(",\"error\":\"Speech is unavailable\"", state = "buffering"))
+        invalid(progress(",\"error\":\"\"", state = "paused"))
+        invalid(progress(",\"error\":\"${"e".repeat(121)}\"", state = "paused"))
+        invalid(progress(",\"error\":5", state = "paused"))
+    }
+
+    @Test fun `media session none drops progress but keeps the error`() {
+        val none = ok("""{"v":1,"type":"media.session","artifactId":"book","state":"none","title":"","artist":"","album":"","actions":[],"position":5,"duration":9,"chapterIndex":1,"error":"Stopped"}""") as Inbound.MediaSession
+        assertThat(listOf(none.position, none.duration, none.chapterIndex)).containsExactly(null, null, null)
+        assertThat(none.error).isEqualTo("Stopped")
+    }
+
+    @Test fun `media session accepts forward and chapter and up to 12 actions`() {
+        val all = "\"play\",\"pause\",\"next\",\"previous\",\"stop\",\"rewind\",\"speed\",\"forward\",\"chapter\""
+        val m = ok(session.replace("\"play\",\"pause\",\"next\",\"previous\",\"stop\"", all)) as Inbound.MediaSession
+        assertThat(m.actions).containsAtLeast(Protocol.MediaAction.FORWARD, Protocol.MediaAction.CHAPTER)
+        // 12 entries (duplicates collapse) are accepted, 13 are over the limit.
+        ok(session.replace("\"play\",\"pause\",\"next\",\"previous\",\"stop\"", "$all,\"play\",\"play\",\"play\""))
+        val over = invalid(session.replace("\"play\",\"pause\",\"next\",\"previous\",\"stop\"", "$all,\"play\",\"play\",\"play\",\"play\""))
+        assertThat(over.reason).isEqualTo(Protocol.Reason.LIMIT)
+    }
+
+    @Test fun `media chapters parses titles and the empty list`() {
+        val m = ok("""{"v":1,"type":"media.chapters","artifactId":"book","chapters":["Letter 1","Chapter 1","${"c".repeat(200)}"]}""") as Inbound.MediaChapters
+        assertThat(m.artifactId).isEqualTo("book")
+        assertThat(m.chapters).hasSize(3)
+        assertThat(m.chapters[2]).hasLength(200)
+        val empty = ok("""{"v":1,"type":"media.chapters","artifactId":"book","chapters":[]}""") as Inbound.MediaChapters
+        assertThat(empty.chapters).isEmpty()
+        val many = (1..500).joinToString(",") { "\"C$it\"" }
+        assertThat((ok("""{"v":1,"type":"media.chapters","artifactId":"book","chapters":[$many]}""") as Inbound.MediaChapters).chapters).hasSize(500)
+        val control = ok("""{"v":1,"type":"media.chapters","artifactId":"book","chapters":["A\u0007B"]}""") as Inbound.MediaChapters
+        assertThat(control.chapters).containsExactly("A B")
+    }
+
+    @Test fun `media chapters rejects malformed lists`() {
+        val base = """{"v":1,"type":"media.chapters","artifactId":"book","chapters":["A"]}"""
+        invalid(base.replace("]}", "],\"extra\":1}"))
+        invalid(base.replace("[\"A\"]", "[\"\"]"))
+        invalid(base.replace("[\"A\"]", "[\"${"c".repeat(201)}\"]"))
+        invalid(base.replace("[\"A\"]", "[1]"))
+        invalid(base.replace("[\"A\"]", "[null]"))
+        invalid(base.replace("[\"A\"]", "\"A\""))
+        invalid("""{"v":1,"type":"media.chapters","artifactId":"book"}""")
+        invalid(base.replace("\"book\"", "\"bad id\""))
+        val many = (1..501).joinToString(",") { "\"C$it\"" }
+        assertThat(invalid("""{"v":1,"type":"media.chapters","artifactId":"book","chapters":[$many]}""").reason).isEqualTo(Protocol.Reason.LIMIT)
+    }
+
+    @Test fun `media command sends forward and chapter with its index`() {
+        val forward = Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.FORWARD)) as JsonObject
+        assertThat(forward.keys).containsExactly("v", "type", "artifactId", "action")
+        assertThat((forward["action"] as JsonPrimitive).content).isEqualTo("forward")
+        val chapter = Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.CHAPTER, 7)) as JsonObject
+        assertThat(chapter.keys).containsExactly("v", "type", "artifactId", "action", "index")
+        assertThat((chapter["action"] as JsonPrimitive).content).isEqualTo("chapter")
+        assertThat((chapter["index"] as JsonPrimitive).isString).isFalse()
+        assertThat((chapter["index"] as JsonPrimitive).content).isEqualTo("7")
+        assertThat(((Protocol.parseJson(Protocol.mediaCommand("book", Protocol.MediaAction.CHAPTER, 499)) as JsonObject)["index"] as JsonPrimitive).content).isEqualTo("499")
+        for (bad in listOf<() -> Unit>(
+            { Protocol.mediaCommand("book", Protocol.MediaAction.CHAPTER) },
+            { Protocol.mediaCommand("book", Protocol.MediaAction.CHAPTER, -1) },
+            { Protocol.mediaCommand("book", Protocol.MediaAction.CHAPTER, 500) },
+            { Protocol.mediaCommand("book", Protocol.MediaAction.PLAY, 1) },
+        )) {
+            assertThat(runCatching(bad).isFailure).isTrue()
+        }
     }
 
     @Test fun `outbound messages carry the protocol field names`() {

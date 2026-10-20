@@ -35,12 +35,23 @@ object Protocol {
     const val MIN_RADIUS_M = 500.0
     const val MAX_RADIUS_M = 10_000.0
     const val MAX_MEDIA_TEXT = 200
-    const val MAX_MEDIA_ACTIONS = 8
+
+    /** 8 before `media.progress` (ADR-0022); 12 since, for the `forward` and `chapter` actions. */
+    const val MAX_MEDIA_ACTIONS = 12
+
+    /** `media.session.position` and `duration`: seconds, 0..86400, at most one decimal. */
+    const val MAX_MEDIA_SECONDS = 86_400.0
+
+    /** `media.session.error`: a short reason, 1..120 characters. */
+    const val MAX_MEDIA_ERROR = 120
+
+    /** `media.chapters.chapters`: 0..500 titles of 1..200 characters. */
+    const val MAX_CHAPTERS = 500
 
     /** Listen speed in `media.session.rate`: "1", "1.25", "0.8", "2" (0 to 99.99). */
     private val MEDIA_RATE = Regex("^(?:0|[1-9][0-9]?)(?:\\.[0-9]{1,2})?$")
 
-    val CAPABILITIES = listOf("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library", "media.rate")
+    val CAPABILITIES = listOf("geo.watch", "audio.queue", "audio.geotrigger", "notify", "media.mirror", "library", "media.rate", "media.progress")
 
     private val ARTIFACT_ID = Regex("^[A-Za-z0-9_-]{1,64}$")
     private val VOICE = Regex("^[A-Za-z0-9_-]{1,64}$")
@@ -71,6 +82,9 @@ object Protocol {
         PLAYING("playing"),
         PAUSED("paused"),
         NONE("none"),
+
+        /** Listen wants to play but is loading, reconnecting or restoring (`media.progress`). */
+        BUFFERING("buffering"),
         ;
 
         companion object {
@@ -91,6 +105,12 @@ object Protocol {
 
         /** Cycle the Listen speed; the shell reports the new value in `media.session.rate`. */
         SPEED("speed"),
+
+        /** Skip ahead 30 seconds (`media.progress`). */
+        FORWARD("forward"),
+
+        /** Start reading a chapter; the command carries `index` (`media.progress`). */
+        CHAPTER("chapter"),
         ;
 
         companion object {
@@ -145,7 +165,18 @@ object Protocol {
             val actions: Set<MediaAction>,
             /** Listen speed ("1", "1.25"), sent only to apps with the `media.rate` capability. */
             val rate: String? = null,
+            /** Estimated position in seconds inside the current chapter (or reading scope). */
+            val position: Double? = null,
+            /** Estimated length in seconds of the same span, when known. */
+            val duration: Double? = null,
+            /** Index into the last `media.chapters` list. */
+            val chapterIndex: Int? = null,
+            /** Why Listen stopped (only with `paused` or `none`), for example "Speech is unavailable". */
+            val error: String? = null,
         ) : Inbound
+
+        /** The page's chapter titles (ADR-0022); empty when it has no chapters. */
+        data class MediaChapters(override val artifactId: String, val chapters: List<String>) : Inbound
     }
 
     sealed interface ParseResult {
@@ -249,7 +280,10 @@ object Protocol {
                 Inbound.PlayedAck(artifactId(o), ids)
             }
             "media.session" -> {
-                keys(o, "v", "type", "artifactId", "state", "title", "artist", "album", "actions", "rate")
+                keys(
+                    o, "v", "type", "artifactId", "state", "title", "artist", "album", "actions", "rate",
+                    "position", "duration", "chapterIndex", "error",
+                )
                 val state = MediaState.of(string(o, "state")) ?: throw Reject()
                 val actions = (o["actions"] ?: JsonArray(emptyList())) as? JsonArray ?: throw Reject()
                 if (actions.size > MAX_MEDIA_ACTIONS) throw Reject(Reason.LIMIT)
@@ -258,17 +292,47 @@ object Protocol {
                     if (!p.isString) throw Reject()
                     MediaAction.of(p.content) ?: throw Reject()
                 }.toCollection(LinkedHashSet())
+                val position = optionalSeconds(o, "position")
+                val duration = optionalSeconds(o, "duration")
+                val chapterIndex = o["chapterIndex"]?.let {
+                    val p = it as? JsonPrimitive ?: throw Reject()
+                    if (p.isString) throw Reject()
+                    val value = p.longOrNull ?: throw Reject()
+                    if (value < 0 || value > Int.MAX_VALUE) throw Reject()
+                    value.toInt()
+                }
+                val error = optionalString(o, "error")?.let { value ->
+                    if (value.isEmpty() || value.length > MAX_MEDIA_ERROR) throw Reject()
+                    if (state != MediaState.PAUSED && state != MediaState.NONE) throw Reject()
+                    cleanText(value).ifEmpty { null }
+                }
+                val live = state != MediaState.NONE
                 Inbound.MediaSession(
                     artifactId = artifactId(o),
                     state = state,
                     title = mediaText(o, "title"),
                     artist = mediaText(o, "artist"),
                     album = mediaText(o, "album"),
-                    actions = if (state == MediaState.NONE) emptySet() else parsedActions,
+                    actions = if (live) parsedActions else emptySet(),
                     rate = (if (o["rate"] is kotlinx.serialization.json.JsonNull) null else optionalString(o, "rate"))
                         ?.also { if (!MEDIA_RATE.matches(it)) throw Reject() }
-                        ?.takeIf { state != MediaState.NONE },
+                        ?.takeIf { live },
+                    position = position?.takeIf { live },
+                    duration = duration?.takeIf { live },
+                    chapterIndex = chapterIndex?.takeIf { live },
+                    error = error,
                 )
+            }
+            "media.chapters" -> {
+                keys(o, "v", "type", "artifactId", "chapters")
+                val array = o["chapters"] as? JsonArray ?: throw Reject()
+                if (array.size > MAX_CHAPTERS) throw Reject(Reason.LIMIT)
+                val chapters = array.map { element ->
+                    val p = element as? JsonPrimitive ?: throw Reject()
+                    if (!p.isString || p.content.isEmpty() || p.content.length > MAX_MEDIA_TEXT) throw Reject()
+                    cleanText(p.content)
+                }
+                Inbound.MediaChapters(artifactId(o), chapters)
             }
             else -> throw Reject(Reason.UNSUPPORTED)
         }
@@ -281,7 +345,25 @@ object Protocol {
     private fun mediaText(o: JsonObject, key: String): String {
         val value = optionalString(o, key) ?: return ""
         if (value.length > MAX_MEDIA_TEXT) throw Reject()
-        return value.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim()
+        return cleanText(value)
+    }
+
+    /** Display text: control characters become spaces, then the ends are trimmed. */
+    private fun cleanText(value: String): String = value.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim()
+
+    /**
+     * Optional seconds of `media.session` (`position`, `duration`): a JSON number from 0 to
+     * [MAX_MEDIA_SECONDS] with at most one decimal.
+     */
+    private fun optionalSeconds(o: JsonObject, key: String): Double? {
+        val element = o[key] ?: return null
+        val p = element as? JsonPrimitive ?: throw Reject()
+        if (p.isString || p.booleanOrNull != null) throw Reject()
+        val d = p.doubleOrNull ?: throw Reject()
+        if (!d.isFinite() || d < 0.0 || d > MAX_MEDIA_SECONDS) throw Reject()
+        val tenths = d * 10.0
+        if (kotlin.math.abs(tenths - kotlin.math.round(tenths)) > 1e-6) throw Reject()
+        return d
     }
 
     private fun audioItem(o: JsonObject, origin: String): AudioItem {
@@ -404,9 +486,18 @@ object Protocol {
         put("at", at)
     }
 
-    fun mediaCommand(artifactId: String, action: MediaAction): String = envelope("media.command") {
-        put("artifactId", artifactId)
-        put("action", action.wire)
+    /**
+     * `media.command`. [index] is required for [MediaAction.CHAPTER] (0..499) and not allowed
+     * for any other action.
+     */
+    fun mediaCommand(artifactId: String, action: MediaAction, index: Int? = null): String {
+        require((action == MediaAction.CHAPTER) == (index != null)) { "index goes with chapter only" }
+        require(index == null || index in 0 until MAX_CHAPTERS) { "chapter index out of range" }
+        return envelope("media.command") {
+            put("artifactId", artifactId)
+            put("action", action.wire)
+            index?.let { put("index", it) }
+        }
     }
 
     fun error(artifactId: String?, requestId: String?, reason: String): String = envelope("error") {

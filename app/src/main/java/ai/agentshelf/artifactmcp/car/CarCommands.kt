@@ -6,18 +6,27 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.CommandButton
 
 /**
- * The car's extra now-playing buttons: "Back 15 s" and "Speed" (showing the current rate).
- * Standard previous, next and play/pause come from the player commands.
+ * The car's extra now-playing buttons: "Back 15 s", "Forward 30 s" and "Speed" (showing the
+ * current rate). Standard previous, next and play/pause come from the player commands.
  *
- * With the Listen mirror the buttons send `media.command` `rewind` and `speed` (the page
- * cycles the speed and reports it in `media.session.rate`). With the native queue the app
- * seeks back 15 s and cycles [NATIVE_RATES] itself.
+ * With the Listen mirror the buttons send `media.command` `rewind`, `forward` (ADR-0022) and
+ * `speed` (the page cycles the speed and reports it in `media.session.rate`). With the native
+ * queue the app seeks back 15 s or forward 30 s and cycles [NATIVE_RATES] itself.
+ *
+ * At most three custom buttons: Android Auto shows custom actions next to play/pause and the
+ * skip buttons and moves the rest to its overflow. Back and forward take the secondary slots
+ * beside previous and next; speed goes to the overflow when forward is shown.
  */
 @OptIn(UnstableApi::class)
 object CarCommands {
     const val REWIND = "ai.agentshelf.artifactmcp.REWIND"
     const val SPEED = "ai.agentshelf.artifactmcp.SPEED"
+    const val FORWARD = "ai.agentshelf.artifactmcp.FORWARD"
     const val REWIND_MS = 15_000L
+    const val FORWARD_MS = 30_000L
+
+    /** Android Auto's limit on custom actions shown without the overflow menu. */
+    const val MAX_BUTTONS = 3
     val NATIVE_RATES = listOf(1f, 1.25f, 1.5f)
 
     data class Button(
@@ -29,12 +38,13 @@ object CarCommands {
         val slots: List<Int>,
     )
 
-    data class Labels(val rewind: String, val speedFormat: String)
+    data class Labels(val rewind: String, val speedFormat: String, val forward: String = "Forward 30 s")
 
     /** The `media.command` action of a custom session command, or null. */
     fun action(customAction: String): MediaAction? = when (customAction) {
         REWIND -> MediaAction.REWIND
         SPEED -> MediaAction.SPEED
+        FORWARD -> MediaAction.FORWARD
         else -> null
     }
 
@@ -58,12 +68,14 @@ object CarCommands {
         else -> CommandButton.ICON_PLAYBACK_SPEED to null
     }
 
-    /** Buttons for what the current source supports, in display order. */
-    fun buttons(rewind: Boolean, speed: Boolean, rate: String?, labels: Labels): List<Button> = buildList {
+    /** Buttons for what the current source supports, in display order (at most [MAX_BUTTONS]). */
+    fun buttons(rewind: Boolean, speed: Boolean, rate: String?, labels: Labels, forward: Boolean = false): List<Button> = buildList {
         if (rewind) add(Button(REWIND, labels.rewind, CommandButton.ICON_SKIP_BACK_15, null, listOf(CommandButton.SLOT_BACK_SECONDARY, CommandButton.SLOT_OVERFLOW)))
+        if (forward) add(Button(FORWARD, labels.forward, CommandButton.ICON_SKIP_FORWARD_30, null, listOf(CommandButton.SLOT_FORWARD_SECONDARY, CommandButton.SLOT_OVERFLOW)))
         if (speed) {
             val (icon, custom) = speedIcon(rate)
-            add(Button(SPEED, labels.speedFormat.format(rateLabel(rate)), icon, custom, listOf(CommandButton.SLOT_FORWARD_SECONDARY, CommandButton.SLOT_OVERFLOW)))
+            val slots = if (forward) listOf(CommandButton.SLOT_OVERFLOW) else listOf(CommandButton.SLOT_FORWARD_SECONDARY, CommandButton.SLOT_OVERFLOW)
+            add(Button(SPEED, labels.speedFormat.format(rateLabel(rate)), icon, custom, slots))
         }
     }
 
@@ -78,4 +90,10 @@ object CarCommands {
 
     /** Seek target for "Back 15 s". */
     fun rewindTarget(positionMs: Long): Long = (positionMs - REWIND_MS).coerceAtLeast(0L)
+
+    /** Seek target for "Forward 30 s"; [durationMs] may be unknown (C.TIME_UNSET, negative). */
+    fun forwardTarget(positionMs: Long, durationMs: Long): Long {
+        val target = positionMs + FORWARD_MS
+        return if (durationMs >= 0) target.coerceAtMost(durationMs) else target
+    }
 }

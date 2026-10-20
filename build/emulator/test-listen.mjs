@@ -5,6 +5,11 @@
 //    MediaBrowser API and plays the story artifact: first in the hidden reader, then in the
 //    visible viewer with the screen off. On each `MARK` line this script screenshots the
 //    expanded notification shade and saves `dumpsys media_session`.
+// 3. Version 0.4.0 (ADR-0022): chapters queue, progress and Forward 30 s; playback resumption
+//    (recent root, play with nothing loaded, and a media button with the app stopped); a pick
+//    without a network fails at once; a missing artifact fails as not found; speech errors
+//    (fake-tts mode 500) and buffering (mode slow). The progress checks need a shell with
+//    `media.progress` (ARTIFACT_MCP_SRC of server.sh).
 // Every assertion prints PASS or FAIL; the exit code is the number of failures.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -20,6 +25,12 @@ const PORT = new URL(ORIGIN).port;
 const SERVER_PORT = 3480; // the dev server without the identity proxy: signed out
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
+const TTS = "http://127.0.0.1:3490";
+const TTS_TOKEN = readFileSync(`${OUT}/fake-tts.token`, "utf8").trim();
+async function ttsMode(mode) {
+  const res = await fetch(`${TTS}/mode`, { method: "POST", headers: { authorization: `Bearer ${TTS_TOKEN}` }, body: mode });
+  console.log(`.... fake-tts mode ${(await res.text()).trim()}`);
+}
 
 mkdirSync(OUT, { recursive: true });
 for (const f of readdirSync(OUT)) if (/^listen-/.test(f)) rmSync(`${OUT}/${f}`);
@@ -76,6 +87,7 @@ async function instrument(method) {
   const child = spawn("docker", ["exec", "-i", EMU, "adb", "shell", "am", "instrument", "-w", "-r",
     "-e", "class", `${PKG}.CarLibraryTest#${method}`,
     "-e", "origin", ORIGIN, "-e", "artifactId", env.STORY_ID, "-e", "signedOutOrigin", `http://localhost:${SERVER_PORT}`,
+    ...(env.BOOK_ID ? ["-e", "bookId", env.BOOK_ID] : []),
     `${PKG}.test/androidx.test.runner.AndroidJUnitRunner`], { stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   child.stdout.on("data", (d) => { output += d; });
@@ -118,9 +130,50 @@ async function instrument(method) {
   record(`${method}: instrumentation passed`, ok, (output.match(/(OK \(.*\)|FAILURES!!!.*|Tests run.*)/) || ["no result"])[0]);
 }
 
+await ttsMode("ok");
 await instrument("signedOutLibraryShowsTheSignInItem");
 await instrument("readerPlaysFromTheCarLibrary");
 await instrument("visibleViewerPlaysFromTheCarLibraryAndKeepsRunningWithTheScreenOff");
+sh("input keyevent KEYCODE_HOME", { check: false });
+
+// ---- 3. version 0.4.0 ----------------------------------------------------------------------
+
+await instrument("chaptersQueueProgressAndForward");
+// Resumption plays the newest recent item: play the story again so it is first.
+await instrument("readerPlaysFromTheCarLibrary");
+await instrument("resumptionPlaysTheNewestRecent");
+
+// A media button with the app stopped: the system sends it to the app's media button receiver,
+// which starts the media service in the foreground; the session resumes the newest recent item.
+sh(`am force-stop ${PKG}`, { check: false });
+await sleep(2000);
+adb(["logcat", "-c"], { check: false });
+sh("cmd media_session dispatch play", { check: false });
+let resumed = "";
+for (let i = 0; i < 90 && !/state=PLAYING\(3\)/.test(resumed); i++) {
+  await sleep(1000);
+  const all = sh("dumpsys media_session", { check: false });
+  const at = all.indexOf(`package=${PKG}`);
+  resumed = at < 0 ? "" : all.slice(at, at + 2500);
+}
+const resumeLog = adb(["logcat", "-d"], { check: false });
+writeFileSync(`${OUT}/listen-media-button-logcat.txt`, resumeLog);
+writeFileSync(`${OUT}/listen-media-button-media_session.txt`, resumed);
+record("resume: a media button with the app stopped resumes the newest recent item",
+  /state=PLAYING\(3\)/.test(resumed) && /playback resumption \(forPlayback=true\): newest recent/.test(resumeLog),
+  ((resumed.match(/description=[^\n]*/) || ["no session"])[0]) + (/ForegroundServiceDidNotStart|FATAL EXCEPTION/.test(resumeLog) ? " CRASH" : ""));
+record("resume: no crash on the media button path", !/FATAL EXCEPTION[\s\S]{0,400}ai\.agentshelf/.test(resumeLog), "logcat checked");
+sh("cmd media_session dispatch stop", { check: false });
+await sleep(3000);
+
+await instrument("offlinePickFailsFastAndPlayRetries");
+await instrument("missingArtifactFailsFastAsNotFound");
+await ttsMode("500");
+await instrument("speechFailureShowsThePageError");
+await ttsMode("slow");
+await instrument("bufferingWhileSpeechIsSlow");
+await ttsMode("ok");
+await instrument("resumptionWithoutRecentsIsAClearError");
 const viewerLog = readFileSync(`${OUT}/listen-visibleViewerPlaysFromTheCarLibraryAndKeepsRunningWithTheScreenOff-logcat.txt`, "utf8");
 const pauses = viewerLog.split("\n").filter((l) => /ArtifactViewer: (viewer WebView|WebView timers)/.test(l)).map((l) => l.replace(/^.*ArtifactViewer: /, ""));
 record("viewer: WebView paused only after Listen paused with the screen off, resumed for the car's play",

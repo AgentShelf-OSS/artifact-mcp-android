@@ -26,13 +26,23 @@ import ai.agentshelf.artifactmcp.state.NoticeStore
 import ai.agentshelf.artifactmcp.state.OriginStore
 import ai.agentshelf.artifactmcp.state.PlayedStore
 import ai.agentshelf.artifactmcp.state.SharedPreferencesStore
+import ai.agentshelf.artifactmcp.bridge.MediaSessionSink
+import ai.agentshelf.artifactmcp.bridge.Protocol
+import ai.agentshelf.artifactmcp.bridge.ShellConnection
 import android.app.Application
+import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.media3.common.Player
+import androidx.media3.session.MediaConstants
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import android.webkit.CookieManager
@@ -83,11 +93,39 @@ class ArtifactApp : Application() {
     lateinit var arbiter: PlaybackArbiter
         private set
     val mirrorPlayer: MirrorPlayer by lazy {
-        MirrorPlayer(Looper.getMainLooper()) { action -> listen.command(action) }.also { player ->
+        MirrorPlayer(Looper.getMainLooper(), onChapter = { index -> listen.chapter(index) }) { action -> listen.command(action) }.also { player ->
             player.artwork = { mirror -> mirrorPresentation(mirror).first }
             player.artifactTitle = { mirror -> mirrorPresentation(mirror).second }
+            player.errorExtras = { mirror -> if (mirror.failure == MirrorState.Failure.SIGN_IN) signInResolution else null }
             listen.player = player
         }
+    }
+
+    /**
+     * Error extras for "sign in": a resolution intent that opens the app on the phone (Android
+     * Auto shows it as a button), with its label.
+     */
+    private val signInResolution: Bundle by lazy {
+        val open = PendingIntent.getActivity(
+            this,
+            1,
+            Intent(this, ai.agentshelf.artifactmcp.ui.MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        Bundle().apply {
+            putString(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_LABEL_COMPAT, getString(R.string.car_sign_in_action))
+            putParcelable(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_INTENT_COMPAT, open)
+        }
+    }
+
+    fun signInResolutionExtras(): Bundle = Bundle(signInResolution)
+
+    /** Whether a network with internet access is up (not whether the server answers). */
+    fun isOnline(): Boolean {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return true
+        val capabilities = runCatching { manager.getNetworkCapabilities(manager.activeNetwork) }.getOrNull() ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private var presentationKey: String? = null
@@ -120,11 +158,19 @@ class ArtifactApp : Application() {
         return CoverUris.uri(packageName, CoverDesign.Spec.Artifact(title, category, color))
     }
 
-    /** Remember what Listen plays for the car's Continue tab. */
+    /**
+     * Remember what Listen plays for the car's Continue tab, with the played share when the page
+     * reports progress (ADR-0022). A paused artifact only updates its share.
+     */
     private fun recordRecent() {
         val mirror = listen.mirror ?: return
-        if (mirror.phase != MirrorState.Phase.PLAYING) return
         val origin = originStore.origin ?: return
+        val fraction = mirror.playedFraction(SystemClock.elapsedRealtime())
+        if (mirror.phase == MirrorState.Phase.PAUSED) {
+            if (fraction != null) recents.updateFraction(origin, mirror.artifactId, fraction)
+            return
+        }
+        if (mirror.phase != MirrorState.Phase.PLAYING) return
         val known = (library.known() as? LibraryView.Ready)?.library
         val artifact = known?.find(mirror.artifactId)
         val org = known?.orgOf(mirror.artifactId)
@@ -138,6 +184,7 @@ class ArtifactApp : Application() {
                 category = artifact?.category ?: previous?.category.orEmpty(),
                 color = org?.color ?: previous?.color,
                 at = System.currentTimeMillis(),
+                fraction = fraction,
             ),
         )
     }
@@ -178,13 +225,21 @@ class ArtifactApp : Application() {
             location = ServiceLocationControl(this),
             audio = LazyAudio(),
             notifier = SystemArtifactNotifier(this) { originStore.origin },
-            media = { message, connection -> listen.onMediaSession(message, connection) },
+            media = object : MediaSessionSink {
+                override fun onMediaSession(message: Protocol.Inbound.MediaSession, connection: ShellConnection) =
+                    listen.onMediaSession(message, connection)
+
+                override fun onMediaChapters(message: Protocol.Inbound.MediaChapters, connection: ShellConnection) =
+                    listen.onMediaChapters(message, connection)
+            },
         )
         listen = ListenController(
             origin = { originStore.origin },
             timers = HandlerTimers(main),
             newReader = ::newReader,
             bindSession = ::bindSession,
+            online = ::isOnline,
+            clock = SystemClock::elapsedRealtime,
         )
         arbiter = PlaybackArbiter(
             pauseNative = { if (audioCreated) audio.player.pause() },
@@ -214,6 +269,9 @@ class ArtifactApp : Application() {
         val page = runCatching {
             ReaderWebView(this, currentOrigin, hub, object : ReaderWebView.Events {
                 override fun onReaderBlocked(reader: ReaderWebView, signIn: Boolean) = listen.onReaderBlocked(signIn)
+                override fun onReaderFailed(reader: ReaderWebView, failure: MirrorState.Failure) {
+                    if (listen.reader?.host === reader.webView) listen.onReaderFailed(failure)
+                }
                 override fun onReaderGone(reader: ReaderWebView) {
                     listen.reader?.let { if (it.host === reader.webView) listen.onReaderGone(it) }
                 }
